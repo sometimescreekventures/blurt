@@ -1,0 +1,8 @@
+.venv/
+__pycache__/
+*.pyc
+.DS_Store
+*.log
+
+# Installed LaunchAgent plist (generated from blurt.plist.template at install time).
+local.blurt.plist
