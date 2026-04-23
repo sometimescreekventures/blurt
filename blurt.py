@@ -255,7 +255,7 @@ class Recorder:
             print(f"[blurt] audio status: {status}", file=sys.stderr)
         self._frames.append(indata.copy().reshape(-1))
 
-    def start(self) -> None:
+    def start(self, device: str | None = None) -> None:
         self._frames = []
         self._start_ts = time.monotonic()
         self._stream = sd.InputStream(
@@ -264,6 +264,7 @@ class Recorder:
             dtype="float32",
             callback=self._cb,
             blocksize=int(SAMPLE_RATE * BLOCK_SEC),
+            device=device,
         )
         self._stream.start()
 
