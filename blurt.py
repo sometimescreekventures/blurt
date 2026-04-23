@@ -314,6 +314,9 @@ class Hotkey:
     def on_press(self, key):
         if key != self.trigger_key:
             return
+        # Reading trigger_key/disabled/device here without a lock is intentional:
+        # the UI thread may mutate them between reads, but a stale stream-open
+        # will fail and the except path below flips self.disabled = True.
         if self.disabled:
             return
         with self._lock:
@@ -391,7 +394,7 @@ class MenuApp(rumps.App):
         self.menu = [
             self._mic_menu,
             self._hotkey_menu,
-            None,  # separator
+            None,  # separator (rumps uses None in .menu lists, rumps.separator inside .add)
             rumps.MenuItem("Quit blurt", callback=self._quit),
         ]
 
@@ -406,6 +409,7 @@ class MenuApp(rumps.App):
     # --- microphone submenu --------------------------------------------------
 
     def _build_mic_menu(self) -> None:
+        """Populate self._mic_menu. Caller must call self._mic_menu.clear() first if rebuilding."""
         default_item = rumps.MenuItem(
             self._SYSTEM_DEFAULT_LABEL,
             callback=self._on_mic_pick,
@@ -445,8 +449,6 @@ class MenuApp(rumps.App):
             title = str(item.title)
             if title == self._SYSTEM_DEFAULT_LABEL:
                 item.state = 1 if self.hotkey.device is None else 0
-            elif title == "Refresh devices":
-                item.state = 0
             else:
                 item.state = 1 if self.hotkey.device == title else 0
 
