@@ -303,28 +303,34 @@ class Recorder:
 # --- hotkey -----------------------------------------------------------------
 
 class Hotkey:
-    def __init__(self) -> None:
+    def __init__(self, trigger_key: Key, device: str | None) -> None:
         self._recording = False
         self._rec = Recorder()
         self._lock = threading.Lock()
+        self.trigger_key = trigger_key
+        self.device = device
+        self.disabled = False
 
     def on_press(self, key):
-        if key != Key.alt_r:
+        if key != self.trigger_key:
+            return
+        if self.disabled:
             return
         with self._lock:
             if self._recording:
                 return
             try:
-                self._rec.start()
+                self._rec.start(self.device)
                 self._recording = True
                 STATE.title = "🔴"
                 play_start()
             except Exception as e:
                 print(f"[blurt] record start: {e}", file=sys.stderr)
                 STATE.title = "⚠️"
+                self.disabled = True
 
     def on_release(self, key):
-        if key != Key.alt_r:
+        if key != self.trigger_key:
             return
         with self._lock:
             if not self._recording:
