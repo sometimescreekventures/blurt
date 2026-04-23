@@ -406,9 +406,6 @@ class MenuApp(rumps.App):
     # --- microphone submenu --------------------------------------------------
 
     def _build_mic_menu(self) -> None:
-        if self._mic_menu._menu is not None:
-            self._mic_menu.clear()
-
         default_item = rumps.MenuItem(
             self._SYSTEM_DEFAULT_LABEL,
             callback=self._on_mic_pick,
@@ -438,6 +435,7 @@ class MenuApp(rumps.App):
         self._refresh_mic_checkmarks()
 
     def _on_refresh_devices(self, _sender) -> None:
+        self._mic_menu.clear()
         self._build_mic_menu()
 
     def _refresh_mic_checkmarks(self) -> None:
@@ -455,8 +453,6 @@ class MenuApp(rumps.App):
     # --- hotkey submenu ------------------------------------------------------
 
     def _build_hotkey_menu(self) -> None:
-        if self._hotkey_menu._menu is not None:
-            self._hotkey_menu.clear()
         current = self._current_hotkey_attr()
         for label, attr in HOTKEY_CHOICES:
             item = rumps.MenuItem(label, callback=self._on_hotkey_pick)
