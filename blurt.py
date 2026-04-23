@@ -379,10 +379,21 @@ class Hotkey:
 # --- menu bar ---------------------------------------------------------------
 
 class MenuApp(rumps.App):
+    _SYSTEM_DEFAULT_LABEL = "System Default"
+
     def __init__(self, hotkey: "Hotkey") -> None:
         super().__init__("blurt", title="🎙", quit_button=None)
         self.hotkey = hotkey
-        self.menu = [rumps.MenuItem("Quit blurt", callback=self._quit)]
+        self._mic_menu = rumps.MenuItem("Microphone")
+        self._hotkey_menu = rumps.MenuItem("Hotkey")
+        self._build_mic_menu()
+        self._build_hotkey_menu()
+        self.menu = [
+            self._mic_menu,
+            self._hotkey_menu,
+            None,  # separator
+            rumps.MenuItem("Quit blurt", callback=self._quit),
+        ]
 
     @rumps.timer(0.1)
     def _tick(self, _):
@@ -391,6 +402,83 @@ class MenuApp(rumps.App):
 
     def _quit(self, _):
         rumps.quit_application()
+
+    # --- microphone submenu --------------------------------------------------
+
+    def _build_mic_menu(self) -> None:
+        if self._mic_menu._menu is not None:
+            self._mic_menu.clear()
+
+        default_item = rumps.MenuItem(
+            self._SYSTEM_DEFAULT_LABEL,
+            callback=self._on_mic_pick,
+        )
+        default_item.state = 1 if self.hotkey.device is None else 0
+        self._mic_menu.add(default_item)
+
+        for name in list_input_devices():
+            item = rumps.MenuItem(name, callback=self._on_mic_pick)
+            item.state = 1 if self.hotkey.device == name else 0
+            self._mic_menu.add(item)
+
+        self._mic_menu.add(rumps.separator)
+        self._mic_menu.add(
+            rumps.MenuItem("Refresh devices", callback=self._on_refresh_devices)
+        )
+
+    def _on_mic_pick(self, sender) -> None:
+        label = str(sender.title)
+        new_device = None if label == self._SYSTEM_DEFAULT_LABEL else label
+        self.hotkey.device = new_device
+        # Picking any real entry means the device exists right now,
+        # so clear the disabled/warning state.
+        self.hotkey.disabled = False
+        STATE.title = "🎙"
+        save_config({"microphone": new_device, "hotkey": self._current_hotkey_attr()})
+        self._refresh_mic_checkmarks()
+
+    def _on_refresh_devices(self, _sender) -> None:
+        self._build_mic_menu()
+
+    def _refresh_mic_checkmarks(self) -> None:
+        for item in self._mic_menu.values():
+            if not isinstance(item, rumps.MenuItem):
+                continue
+            title = str(item.title)
+            if title == self._SYSTEM_DEFAULT_LABEL:
+                item.state = 1 if self.hotkey.device is None else 0
+            elif title == "Refresh devices":
+                item.state = 0
+            else:
+                item.state = 1 if self.hotkey.device == title else 0
+
+    # --- hotkey submenu ------------------------------------------------------
+
+    def _build_hotkey_menu(self) -> None:
+        if self._hotkey_menu._menu is not None:
+            self._hotkey_menu.clear()
+        current = self._current_hotkey_attr()
+        for label, attr in HOTKEY_CHOICES:
+            item = rumps.MenuItem(label, callback=self._on_hotkey_pick)
+            item.state = 1 if attr == current else 0
+            self._hotkey_menu.add(item)
+
+    def _on_hotkey_pick(self, sender) -> None:
+        label = str(sender.title)
+        match = next((attr for lbl, attr in HOTKEY_CHOICES if lbl == label), None)
+        if match is None:
+            return
+        self.hotkey.trigger_key = getattr(Key, match)
+        save_config({"microphone": self.hotkey.device, "hotkey": match})
+        for item in self._hotkey_menu.values():
+            if isinstance(item, rumps.MenuItem):
+                item.state = 1 if str(item.title) == label else 0
+
+    def _current_hotkey_attr(self) -> str:
+        name = getattr(self.hotkey.trigger_key, "name", None)
+        if name in {attr for _, attr in HOTKEY_CHOICES}:
+            return name
+        return DEFAULT_CONFIG["hotkey"]
 
 
 # --- main -------------------------------------------------------------------
