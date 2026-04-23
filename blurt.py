@@ -6,6 +6,8 @@ Audio is transcribed locally via Parakeet-MLX and pasted at the cursor.
 """
 from __future__ import annotations
 
+import json
+import os
 import re
 import signal
 import subprocess
@@ -13,6 +15,7 @@ import sys
 import threading
 import time
 from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
 import rumps
@@ -39,6 +42,87 @@ MODEL_ID = "mlx-community/parakeet-tdt-0.6b-v2"
 SOUND_START = "/System/Library/Sounds/Tink.aiff"
 SOUND_STOP = "/System/Library/Sounds/Pop.aiff"
 SOUND_VOLUME = "0.3"
+
+CONFIG_PATH = Path.home() / "Library" / "Application Support" / "blurt" / "config.json"
+
+# Ordered list of (menu label, pynput Key attribute name).
+# Single source of truth for the Hotkey submenu and for config validation.
+HOTKEY_CHOICES: list[tuple[str, str]] = [
+    ("Right Option", "alt_r"),
+    ("Left Option", "alt_l"),
+    ("Right Command", "cmd_r"),
+    ("Left Command", "cmd_l"),
+    ("Right Control", "ctrl_r"),
+    ("Right Shift", "shift_r"),
+    ("F13", "f13"),
+    ("F14", "f14"),
+    ("F15", "f15"),
+    ("F16", "f16"),
+    ("F17", "f17"),
+    ("F18", "f18"),
+    ("F19", "f19"),
+]
+_HOTKEY_ATTRS = {attr for _, attr in HOTKEY_CHOICES}
+DEFAULT_CONFIG: dict = {"microphone": None, "hotkey": "alt_r"}
+
+
+def load_config() -> dict:
+    """Load config from CONFIG_PATH, merging with defaults.
+
+    Missing file → defaults. Malformed JSON → defaults + warning, file untouched.
+    Unknown hotkey value → defaults['hotkey'] + warning.
+    """
+    cfg = dict(DEFAULT_CONFIG)
+    if not CONFIG_PATH.exists():
+        return cfg
+    try:
+        raw = json.loads(CONFIG_PATH.read_text())
+    except (OSError, json.JSONDecodeError) as e:
+        print(f"[blurt] config unreadable ({e}); using defaults", file=sys.stderr)
+        return cfg
+    if not isinstance(raw, dict):
+        print(f"[blurt] config is not a JSON object; using defaults", file=sys.stderr)
+        return cfg
+    if "microphone" in raw and (raw["microphone"] is None or isinstance(raw["microphone"], str)):
+        cfg["microphone"] = raw["microphone"]
+    if "hotkey" in raw:
+        if isinstance(raw["hotkey"], str) and raw["hotkey"] in _HOTKEY_ATTRS:
+            cfg["hotkey"] = raw["hotkey"]
+        else:
+            print(
+                f"[blurt] unknown hotkey {raw['hotkey']!r} in config; using {DEFAULT_CONFIG['hotkey']!r}",
+                file=sys.stderr,
+            )
+    return cfg
+
+
+def save_config(cfg: dict) -> None:
+    """Write config atomically. Failures log and return; never raise."""
+    try:
+        CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tmp = CONFIG_PATH.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(cfg, indent=2))
+        os.replace(tmp, CONFIG_PATH)
+    except OSError as e:
+        print(f"[blurt] config save failed: {e}", file=sys.stderr)
+
+
+def list_input_devices() -> list[str]:
+    """Return input device names in sounddevice's reported order.
+
+    Duplicates (two identical USB devices) are preserved; lookup at
+    stream-open time resolves to the first name match.
+    """
+    try:
+        devices = sd.query_devices()
+    except Exception as e:
+        print(f"[blurt] device query failed: {e}", file=sys.stderr)
+        return []
+    return [
+        d["name"]
+        for d in devices
+        if d.get("max_input_channels", 0) > 0
+    ]
 
 
 @dataclass
@@ -189,7 +273,7 @@ class Recorder:
             print(f"[blurt] audio status: {status}", file=sys.stderr)
         self._frames.append(indata.copy().reshape(-1))
 
-    def start(self) -> None:
+    def start(self, device: str | None = None) -> None:
         self._frames = []
         self._start_ts = time.monotonic()
         self._stream = sd.InputStream(
@@ -198,6 +282,7 @@ class Recorder:
             dtype="float32",
             callback=self._cb,
             blocksize=int(SAMPLE_RATE * BLOCK_SEC),
+            device=device,
         )
         self._stream.start()
 
@@ -218,28 +303,37 @@ class Recorder:
 # --- hotkey -----------------------------------------------------------------
 
 class Hotkey:
-    def __init__(self) -> None:
+    def __init__(self, trigger_key: Key, device: str | None) -> None:
         self._recording = False
         self._rec = Recorder()
         self._lock = threading.Lock()
+        self.trigger_key = trigger_key
+        self.device = device
+        self.disabled = False
 
     def on_press(self, key):
-        if key != Key.alt_r:
+        if key != self.trigger_key:
+            return
+        # Reading trigger_key/disabled/device here without a lock is intentional:
+        # the UI thread may mutate them between reads, but a stale stream-open
+        # will fail and the except path below flips self.disabled = True.
+        if self.disabled:
             return
         with self._lock:
             if self._recording:
                 return
             try:
-                self._rec.start()
+                self._rec.start(self.device)
                 self._recording = True
                 STATE.title = "🔴"
                 play_start()
             except Exception as e:
                 print(f"[blurt] record start: {e}", file=sys.stderr)
                 STATE.title = "⚠️"
+                self.disabled = True
 
     def on_release(self, key):
-        if key != Key.alt_r:
+        if key != self.trigger_key:
             return
         with self._lock:
             if not self._recording:
@@ -288,9 +382,21 @@ class Hotkey:
 # --- menu bar ---------------------------------------------------------------
 
 class MenuApp(rumps.App):
-    def __init__(self) -> None:
+    _SYSTEM_DEFAULT_LABEL = "System Default"
+
+    def __init__(self, hotkey: "Hotkey") -> None:
         super().__init__("blurt", title="🎙", quit_button=None)
-        self.menu = [rumps.MenuItem("Quit blurt", callback=self._quit)]
+        self.hotkey = hotkey
+        self._mic_menu = rumps.MenuItem("Microphone")
+        self._hotkey_menu = rumps.MenuItem("Hotkey")
+        self._build_mic_menu()
+        self._build_hotkey_menu()
+        self.menu = [
+            self._mic_menu,
+            self._hotkey_menu,
+            None,  # separator (rumps uses None in .menu lists, rumps.separator inside .add)
+            rumps.MenuItem("Quit blurt", callback=self._quit),
+        ]
 
     @rumps.timer(0.1)
     def _tick(self, _):
@@ -300,15 +406,106 @@ class MenuApp(rumps.App):
     def _quit(self, _):
         rumps.quit_application()
 
+    # --- microphone submenu --------------------------------------------------
+
+    def _build_mic_menu(self) -> None:
+        """Populate self._mic_menu. Caller must call self._mic_menu.clear() first if rebuilding."""
+        default_item = rumps.MenuItem(
+            self._SYSTEM_DEFAULT_LABEL,
+            callback=self._on_mic_pick,
+        )
+        default_item.state = 1 if self.hotkey.device is None else 0
+        self._mic_menu.add(default_item)
+
+        for name in list_input_devices():
+            item = rumps.MenuItem(name, callback=self._on_mic_pick)
+            item.state = 1 if self.hotkey.device == name else 0
+            self._mic_menu.add(item)
+
+        self._mic_menu.add(rumps.separator)
+        self._mic_menu.add(
+            rumps.MenuItem("Refresh devices", callback=self._on_refresh_devices)
+        )
+
+    def _on_mic_pick(self, sender) -> None:
+        label = str(sender.title)
+        new_device = None if label == self._SYSTEM_DEFAULT_LABEL else label
+        self.hotkey.device = new_device
+        # Picking any real entry means the device exists right now,
+        # so clear the disabled/warning state.
+        self.hotkey.disabled = False
+        STATE.title = "🎙"
+        save_config({"microphone": new_device, "hotkey": self._current_hotkey_attr()})
+        self._refresh_mic_checkmarks()
+
+    def _on_refresh_devices(self, _sender) -> None:
+        self._mic_menu.clear()
+        self._build_mic_menu()
+
+    def _refresh_mic_checkmarks(self) -> None:
+        for item in self._mic_menu.values():
+            if not isinstance(item, rumps.MenuItem):
+                continue
+            title = str(item.title)
+            if title == self._SYSTEM_DEFAULT_LABEL:
+                item.state = 1 if self.hotkey.device is None else 0
+            else:
+                item.state = 1 if self.hotkey.device == title else 0
+
+    # --- hotkey submenu ------------------------------------------------------
+
+    def _build_hotkey_menu(self) -> None:
+        current = self._current_hotkey_attr()
+        for label, attr in HOTKEY_CHOICES:
+            item = rumps.MenuItem(label, callback=self._on_hotkey_pick)
+            item.state = 1 if attr == current else 0
+            self._hotkey_menu.add(item)
+
+    def _on_hotkey_pick(self, sender) -> None:
+        label = str(sender.title)
+        match = next((attr for lbl, attr in HOTKEY_CHOICES if lbl == label), None)
+        if match is None:
+            return
+        self.hotkey.trigger_key = getattr(Key, match)
+        save_config({"microphone": self.hotkey.device, "hotkey": match})
+        for item in self._hotkey_menu.values():
+            if isinstance(item, rumps.MenuItem):
+                item.state = 1 if str(item.title) == label else 0
+
+    def _current_hotkey_attr(self) -> str:
+        name = getattr(self.hotkey.trigger_key, "name", None)
+        if name in {attr for _, attr in HOTKEY_CHOICES}:
+            return name
+        return DEFAULT_CONFIG["hotkey"]
+
 
 # --- main -------------------------------------------------------------------
 
 def main() -> int:
-    hk = Hotkey()
+    cfg = load_config()
+
+    # Resolve saved hotkey attr → Key. load_config guarantees this is valid.
+    trigger_key = getattr(Key, cfg["hotkey"])
+
+    # If a specific microphone was saved but isn't plugged in, start disabled.
+    device = cfg["microphone"]
+    disabled = False
+    if device is not None and device not in list_input_devices():
+        print(
+            f"[blurt] configured microphone {device!r} not found; "
+            "pick one from the menu or plug it back in",
+            file=sys.stderr,
+        )
+        disabled = True
+        STATE.title = "⚠️"
+
+    hk = Hotkey(trigger_key=trigger_key, device=device)
+    hk.disabled = disabled
+
     threading.Thread(target=load_model, daemon=True).start()
     listener = keyboard.Listener(on_press=hk.on_press, on_release=hk.on_release)
     listener.start()
-    print("[blurt] hold Right Option to talk. ⌘-click menu bar to quit.", flush=True)
+    print("[blurt] hold the configured hotkey to talk. ⌘-click menu bar to quit.", flush=True)
 
     def sigterm(*_):
         listener.stop()
@@ -317,7 +514,7 @@ def main() -> int:
     signal.signal(signal.SIGINT, sigterm)
     signal.signal(signal.SIGTERM, sigterm)
 
-    MenuApp().run()
+    MenuApp(hotkey=hk).run()
     return 0
 
 
