@@ -6,6 +6,8 @@ Audio is transcribed locally via Parakeet-MLX and pasted at the cursor.
 """
 from __future__ import annotations
 
+import json
+import os
 import re
 import signal
 import subprocess
@@ -13,6 +15,7 @@ import sys
 import threading
 import time
 from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
 import rumps
@@ -39,6 +42,69 @@ MODEL_ID = "mlx-community/parakeet-tdt-0.6b-v2"
 SOUND_START = "/System/Library/Sounds/Tink.aiff"
 SOUND_STOP = "/System/Library/Sounds/Pop.aiff"
 SOUND_VOLUME = "0.3"
+
+CONFIG_PATH = Path.home() / "Library" / "Application Support" / "blurt" / "config.json"
+
+# Ordered list of (menu label, pynput Key attribute name).
+# Single source of truth for the Hotkey submenu and for config validation.
+HOTKEY_CHOICES: list[tuple[str, str]] = [
+    ("Right Option", "alt_r"),
+    ("Left Option", "alt_l"),
+    ("Right Command", "cmd_r"),
+    ("Left Command", "cmd_l"),
+    ("Right Control", "ctrl_r"),
+    ("Right Shift", "shift_r"),
+    ("F13", "f13"),
+    ("F14", "f14"),
+    ("F15", "f15"),
+    ("F16", "f16"),
+    ("F17", "f17"),
+    ("F18", "f18"),
+    ("F19", "f19"),
+]
+_HOTKEY_ATTRS = {attr for _, attr in HOTKEY_CHOICES}
+DEFAULT_CONFIG: dict = {"microphone": None, "hotkey": "alt_r"}
+
+
+def load_config() -> dict:
+    """Load config from CONFIG_PATH, merging with defaults.
+
+    Missing file → defaults. Malformed JSON → defaults + warning, file untouched.
+    Unknown hotkey value → defaults['hotkey'] + warning.
+    """
+    cfg = dict(DEFAULT_CONFIG)
+    if not CONFIG_PATH.exists():
+        return cfg
+    try:
+        raw = json.loads(CONFIG_PATH.read_text())
+    except (OSError, json.JSONDecodeError) as e:
+        print(f"[blurt] config unreadable ({e}); using defaults", file=sys.stderr)
+        return cfg
+    if not isinstance(raw, dict):
+        print(f"[blurt] config is not a JSON object; using defaults", file=sys.stderr)
+        return cfg
+    if "microphone" in raw and (raw["microphone"] is None or isinstance(raw["microphone"], str)):
+        cfg["microphone"] = raw["microphone"]
+    if "hotkey" in raw:
+        if isinstance(raw["hotkey"], str) and raw["hotkey"] in _HOTKEY_ATTRS:
+            cfg["hotkey"] = raw["hotkey"]
+        else:
+            print(
+                f"[blurt] unknown hotkey {raw['hotkey']!r} in config; using {DEFAULT_CONFIG['hotkey']!r}",
+                file=sys.stderr,
+            )
+    return cfg
+
+
+def save_config(cfg: dict) -> None:
+    """Write config atomically. Failures log and return; never raise."""
+    try:
+        CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tmp = CONFIG_PATH.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(cfg, indent=2))
+        os.replace(tmp, CONFIG_PATH)
+    except OSError as e:
+        print(f"[blurt] config save failed: {e}", file=sys.stderr)
 
 
 @dataclass
