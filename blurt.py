@@ -107,6 +107,24 @@ def save_config(cfg: dict) -> None:
         print(f"[blurt] config save failed: {e}", file=sys.stderr)
 
 
+def list_input_devices() -> list[str]:
+    """Return input device names in sounddevice's reported order.
+
+    Duplicates (two identical USB devices) are preserved; lookup at
+    stream-open time resolves to the first name match.
+    """
+    try:
+        devices = sd.query_devices()
+    except Exception as e:
+        print(f"[blurt] device query failed: {e}", file=sys.stderr)
+        return []
+    return [
+        d["name"]
+        for d in devices
+        if d.get("max_input_channels", 0) > 0
+    ]
+
+
 @dataclass
 class State:
     title: str = "🎙"
