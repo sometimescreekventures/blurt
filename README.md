@@ -22,37 +22,48 @@ All other dependencies are installed by `./install.sh`.
 
 ## Install
 
+### Quick deploy to a new Mac
+
 ```bash
-git clone https://github.com/<you>/blurt.git
+git clone https://github.com/sometimescreekventures/blurt.git
 cd blurt
 ./install.sh
+./service.sh install && ./service.sh start
 ```
 
-`install.sh` will:
+Then grant the three macOS permissions described in [Permissions](#permissions) — Microphone, Accessibility, and Input Monitoring — to the `.venv/bin/python` binary. That's the only manual step; TCC permissions are per-machine and can't be scripted.
 
-1. Install Xcode Command Line Tools (prompts for GUI install dialog if missing).
-2. Install [uv](https://github.com/astral-sh/uv) if missing.
-3. Create a Python 3.12 virtualenv at `.venv/`.
-4. `uv sync` the locked dependencies from `uv.lock`.
+On first launch the daemon downloads ~600 MB of Parakeet weights from Hugging Face (one-time). After that, cold-start is ~10 s.
 
-First run downloads ~600 MB of Parakeet weights from Hugging Face. After that, startup is ~10 s (model load + warm-up).
+### What each step does
 
-### First run — manual
+`./install.sh`:
+
+1. Installs Xcode Command Line Tools (prompts for GUI install dialog if missing).
+2. Installs [uv](https://github.com/astral-sh/uv) if missing.
+3. Creates a Python 3.12 virtualenv at `.venv/`.
+4. `uv sync`s the locked dependencies from `uv.lock`.
+
+`./service.sh install && ./service.sh start` renders a LaunchAgent plist into `~/Library/LaunchAgents/local.blurt.plist` and bootstraps it so blurt runs at login.
+
+### Running without a LaunchAgent
+
+If you just want to try it first:
 
 ```bash
 uv run python blurt.py
 ```
 
-macOS will prompt for **Microphone** permission the first time you hold the hotkey — approve it. The terminal's log will show `This process is not trusted!` until you grant **Accessibility** and **Input Monitoring** — see [Permissions](#permissions) below.
+macOS will prompt for **Microphone** permission the first time you hold the hotkey — approve it. The terminal will show `This process is not trusted!` until you grant **Accessibility** and **Input Monitoring** — see [Permissions](#permissions).
 
-### Install as a LaunchAgent (auto-start at login)
+### Managing the service
 
 ```bash
-./service.sh install
-./service.sh start
+./service.sh restart     # after pulling code changes
+./service.sh logs        # tail stdout + stderr
+./service.sh status      # launchd state
+./service.sh uninstall   # remove the LaunchAgent
 ```
-
-Use `./service.sh restart` after editing code, `./service.sh logs` to tail stdout/stderr, `./service.sh uninstall` to remove.
 
 ## Permissions
 
