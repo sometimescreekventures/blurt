@@ -379,8 +379,9 @@ class Hotkey:
 # --- menu bar ---------------------------------------------------------------
 
 class MenuApp(rumps.App):
-    def __init__(self) -> None:
+    def __init__(self, hotkey: "Hotkey") -> None:
         super().__init__("blurt", title="🎙", quit_button=None)
+        self.hotkey = hotkey
         self.menu = [rumps.MenuItem("Quit blurt", callback=self._quit)]
 
     @rumps.timer(0.1)
@@ -395,11 +396,30 @@ class MenuApp(rumps.App):
 # --- main -------------------------------------------------------------------
 
 def main() -> int:
-    hk = Hotkey()
+    cfg = load_config()
+
+    # Resolve saved hotkey attr → Key. load_config guarantees this is valid.
+    trigger_key = getattr(Key, cfg["hotkey"])
+
+    # If a specific microphone was saved but isn't plugged in, start disabled.
+    device = cfg["microphone"]
+    disabled = False
+    if device is not None and device not in list_input_devices():
+        print(
+            f"[blurt] configured microphone {device!r} not found; "
+            "pick one from the menu or plug it back in",
+            file=sys.stderr,
+        )
+        disabled = True
+        STATE.title = "⚠️"
+
+    hk = Hotkey(trigger_key=trigger_key, device=device)
+    hk.disabled = disabled
+
     threading.Thread(target=load_model, daemon=True).start()
     listener = keyboard.Listener(on_press=hk.on_press, on_release=hk.on_release)
     listener.start()
-    print("[blurt] hold Right Option to talk. ⌘-click menu bar to quit.", flush=True)
+    print("[blurt] hold the configured hotkey to talk. ⌘-click menu bar to quit.", flush=True)
 
     def sigterm(*_):
         listener.stop()
@@ -408,7 +428,7 @@ def main() -> int:
     signal.signal(signal.SIGINT, sigterm)
     signal.signal(signal.SIGTERM, sigterm)
 
-    MenuApp().run()
+    MenuApp(hotkey=hk).run()
     return 0
 
 
