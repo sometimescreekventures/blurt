@@ -13,12 +13,24 @@ here="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 app_name="Blurt"
 app_dir="$HOME/Applications/$app_name.app"
 bundle_id="local.blurt.launcher"
+icon_src="$here/Resources/Blurt.icns"
 
 [[ -x "$here/service.sh" ]] || { echo "error: service.sh not found at $here" >&2; exit 1; }
 
 mkdir -p "$HOME/Applications"
 rm -rf "$app_dir"
 mkdir -p "$app_dir/Contents/MacOS" "$app_dir/Contents/Resources"
+
+# Copy the icon if present; warn-and-continue if not, so a clean checkout
+# still produces a working (if generic-looking) bundle.
+icon_plist_entry=""
+if [[ -f "$icon_src" ]]; then
+    cp "$icon_src" "$app_dir/Contents/Resources/Blurt.icns"
+    icon_plist_entry='    <key>CFBundleIconFile</key>
+    <string>Blurt</string>'
+else
+    echo "warning: $icon_src not found — bundle will use the generic app icon" >&2
+fi
 
 cat > "$app_dir/Contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -39,6 +51,7 @@ cat > "$app_dir/Contents/Info.plist" <<EOF
     <string>1.0</string>
     <key>CFBundleVersion</key>
     <string>1</string>
+$icon_plist_entry
     <!-- Suppress Dock icon: this is a launcher that exits immediately. -->
     <key>LSUIElement</key>
     <true/>
