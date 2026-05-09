@@ -29,9 +29,11 @@ git clone https://github.com/sometimescreekventures/blurt.git
 cd blurt
 ./install.sh
 ./service.sh install && ./service.sh start
+./permissions.sh                # walks you through Accessibility + Input Monitoring
+./make-app.sh                   # (optional) drops Blurt.app into ~/Applications
 ```
 
-Then grant the three macOS permissions described in [Permissions](#permissions) — Microphone, Accessibility, and Input Monitoring — to the `.venv/bin/python` binary. That's the only manual step; TCC permissions are per-machine and can't be scripted.
+`./permissions.sh` opens Finder with the Python binary preselected and walks you through the two settings panes one at a time. Microphone is granted automatically via an OS popup the first time you record. TCC permissions are per-machine and can't be fully scripted, but the helper does everything macOS allows.
 
 On first launch the daemon downloads ~600 MB of Parakeet weights from Hugging Face (one-time). After that, cold-start is ~10 s.
 
@@ -45,6 +47,10 @@ On first launch the daemon downloads ~600 MB of Parakeet weights from Hugging Fa
 4. `uv sync`s the locked dependencies from `uv.lock`.
 
 `./service.sh install && ./service.sh start` renders a LaunchAgent plist into `~/Library/LaunchAgents/local.blurt.plist` and bootstraps it so blurt runs at login.
+
+`./permissions.sh` resolves the real Python binary path, reveals it in Finder, and opens Accessibility + Input Monitoring settings panes one at a time so you can drag-and-drop the binary into each.
+
+`./make-app.sh` (optional) renders a thin `Blurt.app` launcher into `~/Applications` so you can restart the LaunchAgent by clicking an icon. The bundle uses the custom icon in `Resources/Blurt.icns` and `exec`s `service.sh restart`.
 
 ### Running without a LaunchAgent
 
@@ -67,7 +73,7 @@ macOS will prompt for **Microphone** permission the first time you hold the hotk
 
 ## Permissions
 
-You need to grant three permissions to the Python interpreter that runs `blurt.py`.
+You need to grant three permissions to the Python interpreter that runs `blurt.py`. The fast path is `./permissions.sh` — it opens Finder with the Python binary preselected, then opens each of the two manual settings panes in turn so you can drag-and-drop. The rest of this section is reference material if the helper isn't enough.
 
 **Which Python?** `./service.sh install` prints the real path — typically something like:
 

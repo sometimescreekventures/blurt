@@ -47,10 +47,8 @@ case "${1:-}" in
         cat <<EOF
 installed as $label.
 
-Next: grant Accessibility + Input Monitoring to the real Python binary:
-  $(readlink -f "$here/.venv/bin/python" 2>/dev/null || echo "$here/.venv/bin/python")
-Drag it onto the list area of each pane in System Settings → Privacy & Security.
-Then: ./service.sh restart
+Next: ./permissions.sh   (walks you through granting Accessibility + Input Monitoring)
+Then:  ./service.sh restart
 EOF
         ;;
     start)
