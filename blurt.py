@@ -6,16 +6,20 @@ Audio is transcribed locally via Parakeet-MLX and pasted at the cursor.
 """
 from __future__ import annotations
 
+import functools
 import json
 import os
+import queue
 import re
 import signal
 import subprocess
 import sys
+import textwrap
 import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable, Optional
 
 import numpy as np
 import rumps
@@ -48,6 +52,11 @@ SOUND_STOP = "/System/Library/Sounds/Pop.aiff"
 SOUND_VOLUME = "0.3"
 
 CONFIG_PATH = Path.home() / "Library" / "Application Support" / "blurt" / "config.json"
+REPO_ROOT = Path(__file__).resolve().parent
+
+# Self-update tracks this remote / branch via the menu-bar "Check for Updates" item.
+UPDATE_REMOTE = "origin"
+UPDATE_BRANCH = "main"
 
 # Ordered list of (menu label, pynput Key attribute name).
 # Single source of truth for the Hotkey submenu and for config validation.
@@ -441,6 +450,179 @@ class Hotkey:
         STATE.title = "🎙"
 
 
+# --- self-update ------------------------------------------------------------
+
+@dataclass(frozen=True)
+class UpdateCheck:
+    status: str  # "up_to_date" | "update_available" | "dirty" | "wrong_branch" | "check_failed"
+    local_sha: str = ""
+    remote_sha: str = ""
+    commits_behind: int = 0
+    error: str = ""
+
+
+@dataclass(frozen=True)
+class ApplyResult:
+    status: str  # "restarting" | "dirty" | "wrong_branch" | "fetch_failed" | "uv_failed"
+    error: str = ""
+
+
+def _git(args: list[str], *, repo: Path | None = None, timeout: float = 10.0) -> str:
+    """Run a git command in the repo. Returns stdout (stripped). Raises on non-zero."""
+    proc = subprocess.run(
+        ["git", *args],
+        cwd=str(repo or REPO_ROOT),
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(f"git {' '.join(args)} failed: {proc.stderr.strip()}")
+    return proc.stdout.strip()
+
+
+@functools.lru_cache(maxsize=1)
+def current_version() -> tuple[str, str]:
+    """Return (short_sha, iso_date) for the currently-running checkout.
+
+    Cached for the process lifetime — the daemon's SHA can't change without a restart.
+    """
+    try:
+        sha = _git(["rev-parse", "--short", "HEAD"], timeout=2.0)
+        date = _git(["show", "-s", "--format=%cs", "HEAD"], timeout=2.0)
+        return (sha, date)
+    except (RuntimeError, subprocess.TimeoutExpired, FileNotFoundError) as e:
+        print(f"[blurt] current_version failed: {e}", file=sys.stderr)
+        return ("unknown", "")
+
+
+def check_for_updates(repo: Path | None = None) -> UpdateCheck:
+    """Fetch origin and compare local HEAD to origin/main."""
+    repo = repo or REPO_ROOT
+    try:
+        branch = _git(["symbolic-ref", "--short", "HEAD"], repo=repo, timeout=2.0)
+    except (RuntimeError, subprocess.TimeoutExpired) as e:
+        return UpdateCheck(status="check_failed", error=str(e))
+    if branch != UPDATE_BRANCH:
+        return UpdateCheck(status="wrong_branch", error=f"on {branch}, expected {UPDATE_BRANCH}")
+    try:
+        dirty = _git(["status", "--porcelain"], repo=repo, timeout=5.0)
+    except (RuntimeError, subprocess.TimeoutExpired) as e:
+        return UpdateCheck(status="check_failed", error=str(e))
+    try:
+        _git(["fetch", UPDATE_REMOTE, UPDATE_BRANCH], repo=repo, timeout=15.0)
+    except (RuntimeError, subprocess.TimeoutExpired) as e:
+        return UpdateCheck(status="check_failed", error=str(e))
+    try:
+        local_sha = _git(["rev-parse", "--short", "HEAD"], repo=repo, timeout=2.0)
+        remote_sha = _git(
+            ["rev-parse", "--short", f"{UPDATE_REMOTE}/{UPDATE_BRANCH}"], repo=repo, timeout=2.0
+        )
+        behind = int(
+            _git(
+                ["rev-list", "--count", f"HEAD..{UPDATE_REMOTE}/{UPDATE_BRANCH}"],
+                repo=repo,
+                timeout=5.0,
+            )
+        )
+    except (RuntimeError, subprocess.TimeoutExpired, ValueError) as e:
+        return UpdateCheck(status="check_failed", error=str(e))
+
+    if dirty:
+        return UpdateCheck(
+            status="dirty", local_sha=local_sha, remote_sha=remote_sha, commits_behind=behind
+        )
+    if behind == 0:
+        return UpdateCheck(
+            status="up_to_date", local_sha=local_sha, remote_sha=remote_sha, commits_behind=0
+        )
+    return UpdateCheck(
+        status="update_available",
+        local_sha=local_sha,
+        remote_sha=remote_sha,
+        commits_behind=behind,
+    )
+
+
+def apply_update() -> ApplyResult:
+    """Fetch, reset, uv sync, restart. Refuses dirty checkouts and non-main branches."""
+    try:
+        branch = _git(["symbolic-ref", "--short", "HEAD"], timeout=2.0)
+    except (RuntimeError, subprocess.TimeoutExpired) as e:
+        return ApplyResult(status="fetch_failed", error=str(e))
+    if branch != UPDATE_BRANCH:
+        return ApplyResult(status="wrong_branch", error=f"on {branch}")
+
+    try:
+        dirty = _git(["status", "--porcelain"], timeout=5.0)
+    except (RuntimeError, subprocess.TimeoutExpired) as e:
+        return ApplyResult(status="fetch_failed", error=str(e))
+    if dirty:
+        return ApplyResult(status="dirty")
+
+    try:
+        _git(["fetch", UPDATE_REMOTE, UPDATE_BRANCH], timeout=30.0)
+        _git(["reset", "--hard", f"{UPDATE_REMOTE}/{UPDATE_BRANCH}"], timeout=10.0)
+    except (RuntimeError, subprocess.TimeoutExpired) as e:
+        return ApplyResult(status="fetch_failed", error=str(e))
+
+    try:
+        proc = subprocess.run(
+            ["uv", "sync"],
+            cwd=str(REPO_ROOT),
+            capture_output=True,
+            text=True,
+            timeout=180.0,
+        )
+        if proc.returncode != 0:
+            return ApplyResult(status="uv_failed", error=proc.stderr.strip()[:500])
+    except (subprocess.TimeoutExpired, FileNotFoundError) as e:
+        return ApplyResult(status="uv_failed", error=str(e))
+
+    restart_daemon()
+    return ApplyResult(status="restarting")
+
+
+def restart_daemon() -> None:
+    """Spawn a detached helper that bootstraps a fresh daemon, then exit ourselves.
+
+    We can't run `service.sh restart` inline — bootout SIGTERMs us mid-script.
+    """
+    service_sh = REPO_ROOT / "service.sh"
+    helper = Path("/tmp/blurt-restart.sh")
+    helper.write_text(
+        textwrap.dedent(f"""\
+            #!/bin/sh
+            sleep 2
+            exec "{service_sh}" start
+        """)
+    )
+    helper.chmod(0o755)
+    subprocess.Popen(
+        [str(helper)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    # Deliver SIGTERM to ourselves so the existing signal handler does cleanup
+    # (listener.stop + rumps.quit_application). Clean exit avoids fighting
+    # KeepAlive.SuccessfulExit=false in the LaunchAgent plist.
+    os.kill(os.getpid(), signal.SIGTERM)
+
+
+def has_launchagent() -> bool:
+    """Check whether the LaunchAgent is registered with launchd for this user."""
+    try:
+        subprocess.check_output(
+            ["launchctl", "print", f"gui/{os.getuid()}/local.blurt"],
+            stderr=subprocess.DEVNULL,
+            timeout=2,
+        )
+        return True
+    except (subprocess.CalledProcessError, OSError, subprocess.TimeoutExpired):
+        return False
+
+
 # --- menu bar ---------------------------------------------------------------
 
 class MenuApp(rumps.App):
@@ -456,11 +638,33 @@ class MenuApp(rumps.App):
         self._build_hotkey_menu()
         self._build_type_hotkey_menu()
         self._refresh_hotkey_greyouts()
+
+        sha, date = current_version()
+        version_label = f"Version: {sha}" + (f" ({date})" if date else "")
+        self._version_item = rumps.MenuItem(version_label)  # no callback → disabled
+        self._has_launchagent = has_launchagent()
+        if self._has_launchagent:
+            self._update_item = rumps.MenuItem(
+                "Check for Updates", callback=self._on_check_updates
+            )
+        else:
+            self._update_item = rumps.MenuItem(
+                "Update requires LaunchAgent install"
+            )  # disabled
+
+        # Cross-thread updates to the update label: the background thread enqueues
+        # (title, callback) tuples, the run-loop timer drains them.
+        self._update_queue: queue.Queue[tuple[str, Optional[Callable]]] = queue.Queue()
+        self._update_in_flight = threading.Lock()
+
         self.menu = [
             self._mic_menu,
             self._hotkey_menu,
             self._type_hotkey_menu,
-            None,  # separator (rumps uses None in .menu lists, rumps.separator inside .add)
+            None,  # separator
+            self._version_item,
+            self._update_item,
+            None,
             rumps.MenuItem("Quit blurt", callback=self._quit),
         ]
 
@@ -468,6 +672,13 @@ class MenuApp(rumps.App):
     def _tick(self, _):
         if self.title != STATE.title:
             self.title = STATE.title
+        try:
+            while True:
+                title, cb = self._update_queue.get_nowait()
+                self._update_item.title = title
+                self._update_item.set_callback(cb)
+        except queue.Empty:
+            pass
 
     def _quit(self, _):
         rumps.quit_application()
@@ -603,6 +814,83 @@ class MenuApp(rumps.App):
         cfg.update(overrides)
         return cfg
 
+    # --- self-update --------------------------------------------------------
+
+    def _set_update_label(self, title: str, callback: Optional[Callable]) -> None:
+        """Enqueue a label change; the run-loop timer will apply it on the next tick."""
+        self._update_queue.put((title, callback))
+
+    def _on_check_updates(self, _sender) -> None:
+        if not self._update_in_flight.acquire(blocking=False):
+            return
+        self._set_update_label("Checking…", None)
+        threading.Thread(target=self._check_updates_worker, daemon=True).start()
+
+    def _check_updates_worker(self) -> None:
+        try:
+            result = check_for_updates()
+            self._render_check_result(result)
+        finally:
+            self._update_in_flight.release()
+
+    def _render_check_result(self, result: UpdateCheck) -> None:
+        if result.status == "up_to_date":
+            self._set_update_label("Up to date ✓", self._on_check_updates)
+            # Revert to "Check for Updates" after a few seconds so the user can
+            # click again without the previous "✓" being misleading.
+            threading.Timer(
+                3.0,
+                lambda: self._set_update_label("Check for Updates", self._on_check_updates),
+            ).start()
+        elif result.status == "update_available":
+            label = (
+                f"Update to {result.remote_sha} ({result.commits_behind} commit"
+                f"{'s' if result.commits_behind != 1 else ''} behind)"
+            )
+            self._set_update_label(label, self._on_apply_update)
+        elif result.status == "dirty":
+            self._set_update_label("Update unavailable: local changes", None)
+        elif result.status == "wrong_branch":
+            self._set_update_label(f"Update unavailable: {result.error}", None)
+        else:  # check_failed
+            print(f"[blurt] update check failed: {result.error}", file=sys.stderr)
+            self._set_update_label("Check failed — see logs", self._on_check_updates)
+
+    def _on_apply_update(self, _sender) -> None:
+        if self.hotkey._recording:
+            return
+        if not self._update_in_flight.acquire(blocking=False):
+            return
+        self._set_update_label("Updating…", None)
+        threading.Thread(target=self._apply_update_worker, daemon=True).start()
+
+    def _apply_update_worker(self) -> None:
+        try:
+            result = apply_update()
+            if result.status == "restarting":
+                # restart_daemon already signalled SIGTERM; nothing more to do.
+                return
+            if result.status == "dirty":
+                self._set_update_label("Update unavailable: local changes", None)
+            elif result.status == "wrong_branch":
+                self._set_update_label(f"Update unavailable: {result.error}", None)
+            elif result.status == "uv_failed":
+                print(f"[blurt] uv sync failed: {result.error}", file=sys.stderr)
+                self._set_update_label("Update failed — see logs", self._on_apply_update)
+            else:  # fetch_failed
+                print(f"[blurt] update fetch failed: {result.error}", file=sys.stderr)
+                self._set_update_label("Update failed — see logs", self._on_apply_update)
+        finally:
+            self._update_in_flight.release()
+
+    def startup_update_check(self) -> None:
+        """Run a non-blocking update check after launch."""
+        if not self._has_launchagent:
+            return
+        if not self._update_in_flight.acquire(blocking=False):
+            return
+        threading.Thread(target=self._check_updates_worker, daemon=True).start()
+
 
 # --- main -------------------------------------------------------------------
 
@@ -640,7 +928,9 @@ def main() -> int:
     signal.signal(signal.SIGINT, sigterm)
     signal.signal(signal.SIGTERM, sigterm)
 
-    MenuApp(hotkey=hk).run()
+    app = MenuApp(hotkey=hk)
+    app.startup_update_check()
+    app.run()
     return 0
 
 
