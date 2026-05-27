@@ -67,6 +67,14 @@ def test_check_for_updates_dirty(local_repo):
     assert result.status == "dirty"
 
 
+def test_check_for_updates_untracked_does_not_block(local_repo):
+    """git reset --hard preserves untracked files, so they should not block update."""
+    import blurt
+    (local_repo / "scratch.txt").write_text("not committed, not ignored")
+    result = blurt.check_for_updates(repo=local_repo)
+    assert result.status == "up_to_date"
+
+
 def test_check_for_updates_wrong_branch(local_repo):
     import blurt
     _git(local_repo, "checkout", "-b", "feature-foo")

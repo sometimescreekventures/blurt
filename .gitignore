@@ -6,3 +6,11 @@ __pycache__/
 
 # Installed LaunchAgent plist (generated from blurt.plist.template at install time).
 local.blurt.plist
+
+# Local tooling state (Claude Code, etc.)
+.claude/
+
+# Generated icon assets (produced by make-app.sh)
+Blurt.iconset/
+Blurt.iconset.zip
+Blurt.app/

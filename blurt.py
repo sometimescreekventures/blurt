@@ -506,7 +506,7 @@ def check_for_updates(repo: Path | None = None) -> UpdateCheck:
     if branch != UPDATE_BRANCH:
         return UpdateCheck(status="wrong_branch", error=f"on {branch}, expected {UPDATE_BRANCH}")
     try:
-        dirty = _git(["status", "--porcelain"], repo=repo, timeout=5.0)
+        dirty = _git(["status", "--porcelain", "--untracked-files=no"], repo=repo, timeout=5.0)
     except (RuntimeError, subprocess.TimeoutExpired) as e:
         return UpdateCheck(status="check_failed", error=str(e))
     try:
@@ -554,7 +554,7 @@ def apply_update() -> ApplyResult:
         return ApplyResult(status="wrong_branch", error=f"on {branch}")
 
     try:
-        dirty = _git(["status", "--porcelain"], timeout=5.0)
+        dirty = _git(["status", "--porcelain", "--untracked-files=no"], timeout=5.0)
     except (RuntimeError, subprocess.TimeoutExpired) as e:
         return ApplyResult(status="fetch_failed", error=str(e))
     if dirty:
