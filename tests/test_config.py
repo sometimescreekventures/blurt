@@ -13,21 +13,41 @@ def config_path(tmp_path: Path, monkeypatch):
     return path
 
 
+DEFAULTS = {
+    "microphone": None,
+    "hotkey": "alt_r",
+    "type_hotkey": "cmd_r",
+    "clipboard_hotkey": "ctrl_l",
+}
+
+
 def test_load_config_missing_file_returns_defaults(config_path):
     import blurt
     assert not config_path.exists()
     cfg = blurt.load_config()
-    assert cfg == {"microphone": None, "hotkey": "alt_r", "type_hotkey": "cmd_r"}
+    assert cfg == DEFAULTS
 
 
 def test_load_config_valid_file(config_path):
     import blurt
     config_path.parent.mkdir(parents=True)
     config_path.write_text(
-        json.dumps({"microphone": "C922", "hotkey": "f13", "type_hotkey": "f14"})
+        json.dumps(
+            {
+                "microphone": "C922",
+                "hotkey": "f13",
+                "type_hotkey": "f14",
+                "clipboard_hotkey": "f15",
+            }
+        )
     )
     cfg = blurt.load_config()
-    assert cfg == {"microphone": "C922", "hotkey": "f13", "type_hotkey": "f14"}
+    assert cfg == {
+        "microphone": "C922",
+        "hotkey": "f13",
+        "type_hotkey": "f14",
+        "clipboard_hotkey": "f15",
+    }
 
 
 def test_load_config_malformed_json_returns_defaults(config_path, capsys):
@@ -35,7 +55,7 @@ def test_load_config_malformed_json_returns_defaults(config_path, capsys):
     config_path.parent.mkdir(parents=True)
     config_path.write_text("{not valid json")
     cfg = blurt.load_config()
-    assert cfg == {"microphone": None, "hotkey": "alt_r", "type_hotkey": "cmd_r"}
+    assert cfg == DEFAULTS
     assert "config" in capsys.readouterr().err.lower()
 
 
@@ -54,7 +74,49 @@ def test_load_config_partial_file_merges_defaults(config_path):
     config_path.parent.mkdir(parents=True)
     config_path.write_text(json.dumps({"microphone": "MyMic"}))
     cfg = blurt.load_config()
-    assert cfg == {"microphone": "MyMic", "hotkey": "alt_r", "type_hotkey": "cmd_r"}
+    assert cfg == {**DEFAULTS, "microphone": "MyMic"}
+
+
+def test_clipboard_hotkey_in_choices():
+    import blurt
+    assert "ctrl_l" in {attr for _, attr in blurt.HOTKEY_CHOICES}
+
+
+def test_load_config_unknown_clipboard_hotkey_falls_back(config_path, capsys):
+    import blurt
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text(json.dumps({"clipboard_hotkey": "bogus_key"}))
+    cfg = blurt.load_config()
+    assert cfg["clipboard_hotkey"] == "ctrl_l"
+    assert "clipboard_hotkey" in capsys.readouterr().err.lower()
+
+
+def test_load_config_three_way_collision_resolves_distinct(config_path, capsys):
+    import blurt
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text(
+        json.dumps(
+            {"hotkey": "alt_r", "type_hotkey": "alt_r", "clipboard_hotkey": "alt_r"}
+        )
+    )
+    cfg = blurt.load_config()
+    keys = [cfg["hotkey"], cfg["type_hotkey"], cfg["clipboard_hotkey"]]
+    assert keys[0] == "alt_r"  # highest priority keeps its binding
+    assert len(set(keys)) == 3  # all three distinct
+    assert all(k in {attr for _, attr in blurt.HOTKEY_CHOICES} for k in keys)
+
+
+def test_load_config_clipboard_collides_with_type(config_path, capsys):
+    import blurt
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text(
+        json.dumps(
+            {"hotkey": "alt_r", "type_hotkey": "cmd_r", "clipboard_hotkey": "cmd_r"}
+        )
+    )
+    cfg = blurt.load_config()
+    assert cfg["clipboard_hotkey"] not in {"alt_r", "cmd_r"}
+    assert cfg["type_hotkey"] == "cmd_r"
 
 
 def test_load_config_unknown_type_hotkey_falls_back(config_path, capsys):
@@ -89,10 +151,14 @@ def test_load_config_does_not_overwrite_malformed_file(config_path):
 
 def test_save_config_round_trip(config_path):
     import blurt
-    blurt.save_config({"microphone": "MyMic", "hotkey": "f14", "type_hotkey": "f15"})
-    assert blurt.load_config() == {
-        "microphone": "MyMic", "hotkey": "f14", "type_hotkey": "f15"
+    saved = {
+        "microphone": "MyMic",
+        "hotkey": "f14",
+        "type_hotkey": "f15",
+        "clipboard_hotkey": "f16",
     }
+    blurt.save_config(saved)
+    assert blurt.load_config() == saved
 
 
 def test_save_config_creates_parent_dir(config_path):
