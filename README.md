@@ -109,6 +109,18 @@ If you're just running `uv run python blurt.py` interactively from Terminal, you
 4. Release Right Option — Pop sound plays, menu bar shows `✨` briefly while transcribing.
 5. Text pastes at your cursor.
 
+### Three hotkeys
+
+blurt has three independently configurable hold-to-fire hotkeys, each selectable from its own menu-bar submenu (no two may share a key):
+
+| Hotkey | Default | What it does |
+| ------ | ------- | ------------ |
+| **Dictate → paste** | Right Option (`⌥`) | Transcribe speech, deliver via clipboard + ⌘V. The original, fastest path. |
+| **Dictate → type** | Right Command (`⌘`) | Transcribe speech, deliver by synthesizing keystrokes. Use in VDI/remote clients where ⌘V is broken or mangled. |
+| **Type clipboard** | Left Control (`⌃`) | Type whatever is on the clipboard out as keystrokes — no microphone. For pasting prepared text into a VDI that blocks paste but allows typing. Hold to start; **press again to abort** a long type. Menu bar shows `⌨️` while typing. |
+
+The two dictate hotkeys are interchangeable per utterance — hold whichever one suits the destination field. The keystroke paths (type and clipboard) both honor `TYPE_KEY_DELAY` for clients that drop fast input.
+
 ### Continuation spacing
 
 If you dictate two utterances within 15 s of each other, the second gets a leading space — so `"Hello."` + `"How are you?"` becomes `"Hello. How are you?"` rather than `"Hello.How are you?"`. After 15 s of idle, the next paste has no leading space (assumes you've moved to a new context). Tune via `CONTINUATION_SEC` in `blurt.py`.
@@ -134,10 +146,11 @@ All knobs are constants at the top of `blurt.py`:
 | `VAD_RMS_THRESHOLD`       | `0.01`                                 | Per-100ms-frame RMS; below this = silence.                   |
 | `VAD_MIN_VOICED_FRAMES`   | `2`                                    | Require N voiced frames before transcribing.                 |
 | `CLIPBOARD_RESTORE_DELAY` | `0.8`                                  | How long to wait before restoring the clipboard after paste. |
+| `TYPE_KEY_DELAY`          | `0.0`                                  | Per-character delay (s) for the keystroke paths. Bump to `0.005`–`0.01` if a slow VDI drops characters. |
 | `SOUND_START` / `SOUND_STOP` | `Tink.aiff` / `Pop.aiff`            | Built-in system sounds. See `/System/Library/Sounds/`.       |
 | `SOUND_VOLUME`            | `0.3`                                  | `afplay -v` argument, 0.0–1.0.                               |
 
-Hotkey is hard-coded to `Key.alt_r` (Right Option) in the `Hotkey` class. Swap for `Key.cmd_r`, `Key.ctrl_r`, etc. if you prefer.
+All three hotkeys are chosen from menu-bar submenus and persisted to `~/Library/Application Support/blurt/config.json` (keys `hotkey`, `type_hotkey`, `clipboard_hotkey`). Defaults are Right Option / Right Command / Left Control. The picker offers single modifiers and F13–F19; no two hotkeys may share a key.
 
 ## Architecture
 

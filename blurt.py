@@ -65,6 +65,7 @@ HOTKEY_CHOICES: list[tuple[str, str]] = [
     ("Left Option", "alt_l"),
     ("Right Command", "cmd_r"),
     ("Left Command", "cmd_l"),
+    ("Left Control", "ctrl_l"),
     ("Right Control", "ctrl_r"),
     ("Right Shift", "shift_r"),
     ("F13", "f13"),
@@ -76,7 +77,12 @@ HOTKEY_CHOICES: list[tuple[str, str]] = [
     ("F19", "f19"),
 ]
 _HOTKEY_ATTRS = {attr for _, attr in HOTKEY_CHOICES}
-DEFAULT_CONFIG: dict = {"microphone": None, "hotkey": "alt_r", "type_hotkey": "cmd_r"}
+DEFAULT_CONFIG: dict = {
+    "microphone": None,
+    "hotkey": "alt_r",
+    "type_hotkey": "cmd_r",
+    "clipboard_hotkey": "ctrl_l",
+}
 
 
 def load_config() -> dict:
@@ -106,26 +112,33 @@ def load_config() -> dict:
                 f"[blurt] unknown hotkey {raw['hotkey']!r} in config; using {DEFAULT_CONFIG['hotkey']!r}",
                 file=sys.stderr,
             )
-    if "type_hotkey" in raw:
-        if isinstance(raw["type_hotkey"], str) and raw["type_hotkey"] in _HOTKEY_ATTRS:
-            cfg["type_hotkey"] = raw["type_hotkey"]
-        else:
+    for field in ("type_hotkey", "clipboard_hotkey"):
+        if field in raw:
+            if isinstance(raw[field], str) and raw[field] in _HOTKEY_ATTRS:
+                cfg[field] = raw[field]
+            else:
+                print(
+                    f"[blurt] unknown {field} {raw[field]!r} in config; "
+                    f"using {DEFAULT_CONFIG[field]!r}",
+                    file=sys.stderr,
+                )
+    # Resolve collisions in priority order: hotkey wins, then type_hotkey,
+    # then clipboard_hotkey. HOTKEY_CHOICES has far more entries than the three
+    # keys, so a non-colliding fallback always exists.
+    used: set[str] = {cfg["hotkey"]}
+    for field in ("type_hotkey", "clipboard_hotkey"):
+        if cfg[field] in used:
+            fallback = next(
+                (attr for _, attr in HOTKEY_CHOICES if attr not in used),
+                DEFAULT_CONFIG[field],
+            )
             print(
-                f"[blurt] unknown type_hotkey {raw['type_hotkey']!r} in config; "
-                f"using {DEFAULT_CONFIG['type_hotkey']!r}",
+                f"[blurt] {field} collides with an already-bound key {cfg[field]!r}; "
+                f"falling back to {fallback!r}",
                 file=sys.stderr,
             )
-    if cfg["hotkey"] == cfg["type_hotkey"]:
-        fallback = next(
-            (attr for _, attr in HOTKEY_CHOICES if attr != cfg["hotkey"]),
-            DEFAULT_CONFIG["type_hotkey"],
-        )
-        print(
-            f"[blurt] hotkey and type_hotkey both bound to {cfg['hotkey']!r}; "
-            f"falling back type_hotkey to {fallback!r}",
-            file=sys.stderr,
-        )
-        cfg["type_hotkey"] = fallback
+            cfg[field] = fallback
+        used.add(cfg[field])
     return cfg
 
 
@@ -293,6 +306,24 @@ def paste_text(text: str) -> None:
     threading.Thread(target=restore, daemon=True).start()
 
 
+def _emit_keystrokes(text: str, abort: "threading.Event | None" = None) -> int:
+    """Type text via synthesized keystrokes. Returns the number of chars emitted.
+
+    Iterates per character (even when TYPE_KEY_DELAY == 0) so the abort flag,
+    when supplied, is honored — it is checked *before* each keystroke, keeping
+    the modifier-combo window during an abort to at most one in-flight char.
+    """
+    n = 0
+    for ch in text:
+        if abort is not None and abort.is_set():
+            break
+        _kb.type(ch)
+        n += 1
+        if TYPE_KEY_DELAY > 0.0:
+            time.sleep(TYPE_KEY_DELAY)
+    return n
+
+
 def type_text(text: str) -> None:
     """Deliver text via synthesized keystrokes (for VDIs that mangle ⌘V)."""
     global _last_paste_ts
@@ -302,13 +333,25 @@ def type_text(text: str) -> None:
     if now - _last_paste_ts < CONTINUATION_SEC and text[:1].isalnum():
         text = " " + text
 
-    if TYPE_KEY_DELAY > 0.0:
-        for ch in text:
-            _kb.type(ch)
-            time.sleep(TYPE_KEY_DELAY)
-    else:
-        _kb.type(text)
+    _emit_keystrokes(text)
     _last_paste_ts = time.monotonic()
+
+
+def type_clipboard(abort: "threading.Event") -> None:
+    """Type the current clipboard contents out verbatim as keystrokes.
+
+    No continuation-space munging and no _last_paste_ts update — this is a
+    deliberate bulk entry, not a dictation continuation. Honors `abort`.
+    """
+    text = pbpaste()
+    if not text.strip():
+        print("[blurt] clipboard empty; nothing to type", flush=True)
+        return
+    n = _emit_keystrokes(text, abort=abort)
+    if abort.is_set():
+        print(f"[blurt] clipboard type aborted after {n} chars", flush=True)
+    else:
+        print(f"[blurt] clipboard typed {n} chars", flush=True)
 
 
 # --- audio capture ----------------------------------------------------------
@@ -354,19 +397,46 @@ class Recorder:
 # --- hotkey -----------------------------------------------------------------
 
 class Hotkey:
-    def __init__(self, trigger_key: Key, type_trigger_key: Key, device: str | None) -> None:
+    def __init__(
+        self,
+        trigger_key: Key,
+        type_trigger_key: Key,
+        clipboard_trigger_key: Key,
+        device: str | None,
+    ) -> None:
         self._recording = False
         self._rec = Recorder()
         self._lock = threading.Lock()
         self.trigger_key = trigger_key
         self.type_trigger_key = type_trigger_key
+        self.clipboard_trigger_key = clipboard_trigger_key
         # Which delivery path the current recording is bound to; set in on_press,
         # read in on_release/_work, cleared after dispatch.
         self._active_mode: str | None = None
+        # Clipboard-typing state (a separate, audio-free path).
+        self._clip_pending = False
+        self._clip_press_ts = 0.0
+        self._clip_typing = False
+        self._clip_abort: "threading.Event | None" = None
         self.device = device
         self.disabled = False
 
     def on_press(self, key):
+        # Clipboard hotkey: re-press while typing aborts; otherwise it's a
+        # hold-to-fire that types the clipboard on release. No mic, no model,
+        # and it works even when dictation is disabled (missing mic).
+        if key == self.clipboard_trigger_key:
+            if self._clip_typing:
+                if self._clip_abort is not None:
+                    self._clip_abort.set()
+                return
+            with self._lock:
+                if self._recording:
+                    return  # dictation in progress; ignore
+                self._clip_pending = True
+                self._clip_press_ts = time.monotonic()
+            return
+
         if key == self.trigger_key:
             mode = "paste"
         elif key == self.type_trigger_key:
@@ -379,7 +449,7 @@ class Hotkey:
         if self.disabled:
             return
         with self._lock:
-            if self._recording:
+            if self._recording or self._clip_typing:
                 return
             try:
                 self._rec.start(self.device)
@@ -393,6 +463,23 @@ class Hotkey:
                 self.disabled = True
 
     def on_release(self, key):
+        # Clipboard hotkey release: fire if it was a genuine hold.
+        if key == self.clipboard_trigger_key:
+            with self._lock:
+                if not self._clip_pending:
+                    return  # e.g. this release followed an abort re-press
+                self._clip_pending = False
+                held = time.monotonic() - self._clip_press_ts
+                if held < MIN_HOLD_SEC:
+                    return
+                if self._recording or self._clip_typing:
+                    return
+                self._clip_typing = True
+                self._clip_abort = threading.Event()
+            STATE.title = "⌨️"
+            threading.Thread(target=self._clip_work, daemon=True).start()
+            return
+
         # Only react to release of whichever key started the active recording.
         active_key = (
             self.trigger_key if self._active_mode == "paste"
@@ -448,6 +535,18 @@ class Hotkey:
             STATE.title = "⚠️"
             return
         STATE.title = "🎙"
+
+    def _clip_work(self) -> None:
+        try:
+            type_clipboard(self._clip_abort)
+        except Exception as e:
+            print(f"[blurt] clipboard type: {e}", file=sys.stderr)
+        finally:
+            with self._lock:
+                self._clip_typing = False
+                self._clip_abort = None
+            # Restore the resting icon, preserving the mic-missing warning.
+            STATE.title = "⚠️" if self.disabled else "🎙"
 
 
 # --- self-update ------------------------------------------------------------
@@ -634,9 +733,11 @@ class MenuApp(rumps.App):
         self._mic_menu = rumps.MenuItem("Microphone")
         self._hotkey_menu = rumps.MenuItem("Hotkey")
         self._type_hotkey_menu = rumps.MenuItem("Type-mode Hotkey")
+        self._clipboard_hotkey_menu = rumps.MenuItem("Clipboard Hotkey")
         self._build_mic_menu()
         self._build_hotkey_menu()
         self._build_type_hotkey_menu()
+        self._build_clipboard_hotkey_menu()
         self._refresh_hotkey_greyouts()
 
         sha, date = current_version()
@@ -661,6 +762,7 @@ class MenuApp(rumps.App):
             self._mic_menu,
             self._hotkey_menu,
             self._type_hotkey_menu,
+            self._clipboard_hotkey_menu,
             None,  # separator
             self._version_item,
             self._update_item,
@@ -741,7 +843,10 @@ class MenuApp(rumps.App):
     def _on_hotkey_pick(self, sender) -> None:
         label = str(sender.title)
         match = next((attr for lbl, attr in HOTKEY_CHOICES if lbl == label), None)
-        if match is None or match == self._current_type_hotkey_attr():
+        if match is None or match in {
+            self._current_type_hotkey_attr(),
+            self._current_clipboard_hotkey_attr(),
+        }:
             # collision guard; the entry should already be greyed
             return
         self.hotkey.trigger_key = getattr(Key, match)
@@ -769,7 +874,10 @@ class MenuApp(rumps.App):
     def _on_type_hotkey_pick(self, sender) -> None:
         label = str(sender.title)
         match = next((attr for lbl, attr in HOTKEY_CHOICES if lbl == label), None)
-        if match is None or match == self._current_hotkey_attr():
+        if match is None or match in {
+            self._current_hotkey_attr(),
+            self._current_clipboard_hotkey_attr(),
+        }:
             return
         self.hotkey.type_trigger_key = getattr(Key, match)
         save_config(self._current_config(type_hotkey=match))
@@ -784,32 +892,80 @@ class MenuApp(rumps.App):
             return name
         return DEFAULT_CONFIG["type_hotkey"]
 
+    # --- clipboard hotkey submenu -------------------------------------------
+
+    def _build_clipboard_hotkey_menu(self) -> None:
+        current = self._current_clipboard_hotkey_attr()
+        for label, attr in HOTKEY_CHOICES:
+            item = rumps.MenuItem(label, callback=self._on_clipboard_hotkey_pick)
+            item.state = 1 if attr == current else 0
+            self._clipboard_hotkey_menu.add(item)
+
+    def _on_clipboard_hotkey_pick(self, sender) -> None:
+        label = str(sender.title)
+        match = next((attr for lbl, attr in HOTKEY_CHOICES if lbl == label), None)
+        if match is None or match in {
+            self._current_hotkey_attr(),
+            self._current_type_hotkey_attr(),
+        }:
+            return
+        self.hotkey.clipboard_trigger_key = getattr(Key, match)
+        save_config(self._current_config(clipboard_hotkey=match))
+        for item in self._clipboard_hotkey_menu.values():
+            if isinstance(item, rumps.MenuItem):
+                item.state = 1 if str(item.title) == label else 0
+        self._refresh_hotkey_greyouts()
+
+    def _current_clipboard_hotkey_attr(self) -> str:
+        name = getattr(self.hotkey.clipboard_trigger_key, "name", None)
+        if name in {attr for _, attr in HOTKEY_CHOICES}:
+            return name
+        return DEFAULT_CONFIG["clipboard_hotkey"]
+
     def _refresh_hotkey_greyouts(self) -> None:
-        """Grey out the cross-bound entry in each submenu to prevent collisions."""
-        paste_attr = self._current_hotkey_attr()
-        type_attr = self._current_type_hotkey_attr()
-        for item in self._hotkey_menu.values():
-            if not isinstance(item, rumps.MenuItem):
-                continue
-            attr = next((a for lbl, a in HOTKEY_CHOICES if lbl == str(item.title)), None)
-            if attr == type_attr and attr != paste_attr:
-                item.set_callback(None)
-            else:
-                item.set_callback(self._on_hotkey_pick)
-        for item in self._type_hotkey_menu.values():
-            if not isinstance(item, rumps.MenuItem):
-                continue
-            attr = next((a for lbl, a in HOTKEY_CHOICES if lbl == str(item.title)), None)
-            if attr == paste_attr and attr != type_attr:
-                item.set_callback(None)
-            else:
-                item.set_callback(self._on_type_hotkey_pick)
+        """Grey out cross-bound entries in each submenu to prevent collisions.
+
+        In each submenu, an entry is disabled when its key is bound by either
+        of the *other two* hotkeys (but never the one this submenu owns).
+        """
+        own = {
+            id(self._hotkey_menu): (self._current_hotkey_attr(), self._on_hotkey_pick),
+            id(self._type_hotkey_menu): (
+                self._current_type_hotkey_attr(),
+                self._on_type_hotkey_pick,
+            ),
+            id(self._clipboard_hotkey_menu): (
+                self._current_clipboard_hotkey_attr(),
+                self._on_clipboard_hotkey_pick,
+            ),
+        }
+        all_bound = {
+            self._current_hotkey_attr(),
+            self._current_type_hotkey_attr(),
+            self._current_clipboard_hotkey_attr(),
+        }
+        for menu in (
+            self._hotkey_menu,
+            self._type_hotkey_menu,
+            self._clipboard_hotkey_menu,
+        ):
+            own_attr, own_cb = own[id(menu)]
+            others = all_bound - {own_attr}
+            for item in menu.values():
+                if not isinstance(item, rumps.MenuItem):
+                    continue
+                attr = next((a for lbl, a in HOTKEY_CHOICES if lbl == str(item.title)), None)
+                if attr in others:
+                    item.set_callback(None)
+                else:
+                    item.set_callback(own_cb)
 
     def _current_config(self, **overrides) -> dict:
         cfg = {
             "microphone": self.hotkey.device,
             "hotkey": self._current_hotkey_attr(),
             "type_hotkey": self._current_type_hotkey_attr(),
+            "clipboard_hotkey": self._current_clipboard_hotkey_attr(),
         }
         cfg.update(overrides)
         return cfg
@@ -900,6 +1056,7 @@ def main() -> int:
     # Resolve saved hotkey attr → Key. load_config guarantees this is valid.
     trigger_key = getattr(Key, cfg["hotkey"])
     type_trigger_key = getattr(Key, cfg["type_hotkey"])
+    clipboard_trigger_key = getattr(Key, cfg["clipboard_hotkey"])
 
     # If a specific microphone was saved but isn't plugged in, start disabled.
     device = cfg["microphone"]
@@ -913,7 +1070,12 @@ def main() -> int:
         disabled = True
         STATE.title = "⚠️"
 
-    hk = Hotkey(trigger_key=trigger_key, type_trigger_key=type_trigger_key, device=device)
+    hk = Hotkey(
+        trigger_key=trigger_key,
+        type_trigger_key=type_trigger_key,
+        clipboard_trigger_key=clipboard_trigger_key,
+        device=device,
+    )
     hk.disabled = disabled
 
     threading.Thread(target=load_model, daemon=True).start()
