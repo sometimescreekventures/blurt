@@ -88,3 +88,27 @@ def test_check_for_updates_non_repo(tmp_path, monkeypatch):
     monkeypatch.setattr(blurt, "REPO_ROOT", tmp_path)
     result = blurt.check_for_updates(repo=tmp_path)
     assert result.status == "check_failed"
+
+
+# --- restart mechanism ------------------------------------------------------
+
+def test_restart_daemon_exits_nonzero():
+    """The daemon must exit with a non-zero status so the LaunchAgent's
+    KeepAlive(SuccessfulExit=false) relaunches it with the freshly-synced code.
+    A clean exit (0) would NOT relaunch — that was the original bug."""
+    import blurt
+    codes = []
+    blurt.restart_daemon(_exit=lambda code: codes.append(code))
+    assert codes == [1]
+
+
+def test_restart_daemon_spawns_no_helper(monkeypatch, tmp_path):
+    """The detached helper approach was unreliable (launchd reaps the job's
+    descendants). The fix must not spawn any subprocess."""
+    import blurt
+    popened = []
+    monkeypatch.setattr(blurt.subprocess, "Popen", lambda *a, **k: popened.append(a))
+    helper = tmp_path / "blurt-restart.sh"
+    blurt.restart_daemon(_exit=lambda code: None)
+    assert popened == []
+    assert not helper.exists()
