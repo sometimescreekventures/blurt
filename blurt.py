@@ -18,12 +18,14 @@ import textwrap
 import threading
 import time
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Callable, Optional
 
 import numpy as np
 import rumps
 import sounddevice as sd
+import soundfile as sf
 from pynput import keyboard
 from pynput.keyboard import Controller as KBController, Key
 
@@ -46,6 +48,11 @@ VAD_RMS_THRESHOLD = 0.01
 VAD_MIN_VOICED_FRAMES = 2
 
 MODEL_ID = "mlx-community/parakeet-tdt-0.6b-v2"
+
+# Meeting recorder: long-form capture from the selected input device, chunked
+# transcription, written to a timestamped document.
+MEETING_DIR = Path.home() / "Documents" / "blurt-meetings"
+MEETING_CHUNK_SEC = 30.0
 
 SOUND_START = "/System/Library/Sounds/Tink.aiff"
 SOUND_STOP = "/System/Library/Sounds/Pop.aiff"
@@ -403,6 +410,7 @@ class Hotkey:
         type_trigger_key: Key,
         clipboard_trigger_key: Key,
         device: str | None,
+        meeting_active: "threading.Event | None" = None,
     ) -> None:
         self._recording = False
         self._rec = Recorder()
@@ -418,6 +426,8 @@ class Hotkey:
         self._clip_press_ts = 0.0
         self._clip_typing = False
         self._clip_abort: "threading.Event | None" = None
+        # Set while a meeting recording owns the mic; dictation paths defer to it.
+        self._meeting_active = meeting_active or threading.Event()
         self.device = device
         self.disabled = False
 
@@ -442,6 +452,10 @@ class Hotkey:
         elif key == self.type_trigger_key:
             mode = "type"
         else:
+            return
+        # A meeting recording owns the mic; dictation defers to it. (The
+        # clipboard path above is unaffected — it needs no microphone.)
+        if self._meeting_active.is_set():
             return
         # Reading trigger_key/disabled/device here without a lock is intentional:
         # the UI thread may mutate them between reads, but a stale stream-open
@@ -547,6 +561,195 @@ class Hotkey:
                 self._clip_abort = None
             # Restore the resting icon, preserving the mic-missing warning.
             STATE.title = "⚠️" if self.disabled else "🎙"
+
+
+# --- meeting recorder -------------------------------------------------------
+
+def _fmt_hms(seconds: float) -> str:
+    s = int(seconds)
+    return f"{s // 3600:02d}:{(s % 3600) // 60:02d}:{s % 60:02d}"
+
+
+def meeting_paths(start_dt: datetime, directory: Path = MEETING_DIR) -> tuple[Path, Path]:
+    """Return (txt_path, wav_path) sharing a timestamped stem.
+
+    Disambiguates with -2, -3, … if either file already exists, so two
+    recordings in the same minute never clobber each other.
+    """
+    base = f"{start_dt.strftime('%Y-%m-%d-%H-%M')}-meeting"
+    candidate, n = base, 2
+    while (directory / f"{candidate}.txt").exists() or (directory / f"{candidate}.wav").exists():
+        candidate, n = f"{base}-{n}", n + 1
+    return directory / f"{candidate}.txt", directory / f"{candidate}.wav"
+
+
+class MeetingRecorder:
+    """Long-form capture from the selected input device → chunked transcript.
+
+    Capture runs on the sounddevice callback thread (push blocks to a queue);
+    a worker thread streams those blocks to a WAV and transcribes ~30s chunks,
+    appending text to the .txt as it goes. Both files grow incrementally so a
+    crash leaves a usable WAV + partial transcript behind.
+    """
+
+    def __init__(self, meeting_active: threading.Event) -> None:
+        self._meeting_active = meeting_active
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._queue: "queue.Queue[np.ndarray]" = queue.Queue()
+        self._stream: sd.InputStream | None = None
+        self._worker: threading.Thread | None = None
+        self._wav: sf.SoundFile | None = None
+        self._txt_path: Path | None = None
+        self._chunk: list[np.ndarray] = []
+        self._chunk_samples = 0
+        self._start_dt: datetime | None = None
+        self._start_mono = 0.0
+        self._done = False
+        self.last_output_path: Path | None = None
+
+    def is_active(self) -> bool:
+        return self._meeting_active.is_set()
+
+    def elapsed(self) -> float:
+        return time.monotonic() - self._start_mono if self.is_active() else 0.0
+
+    def start(self, device: str | None) -> bool:
+        """Open outputs + stream and begin recording. False on failure (no state left)."""
+        if self.is_active():
+            return False
+        try:
+            MEETING_DIR.mkdir(parents=True, exist_ok=True)
+            self._start_dt = datetime.now()
+            txt_path, wav_path = meeting_paths(self._start_dt)
+            self._txt_path = txt_path
+            txt_path.write_text(f"Meeting — {self._start_dt.strftime('%Y-%m-%d %H:%M')}\n\n")
+            self._wav = sf.SoundFile(
+                str(wav_path), mode="w", samplerate=SAMPLE_RATE,
+                channels=CHANNELS, subtype="PCM_16",
+            )
+            self._stop.clear()
+            self._done = False
+            self._chunk, self._chunk_samples = [], 0
+            self._queue = queue.Queue()
+            self._stream = sd.InputStream(
+                samplerate=SAMPLE_RATE, channels=CHANNELS, dtype="float32",
+                callback=self._cb, blocksize=int(SAMPLE_RATE * BLOCK_SEC),
+                device=device, finished_callback=self._on_stream_finished,
+            )
+            self._stream.start()
+        except Exception as e:
+            print(f"[blurt] meeting start failed: {e}", file=sys.stderr)
+            self._cleanup_outputs()
+            return False
+
+        self._start_mono = time.monotonic()
+        self._worker = threading.Thread(target=self._run, daemon=True)
+        self._worker.start()
+        self._meeting_active.set()
+        STATE.title = "⏺"
+        print(f"[blurt] meeting recording → {self._txt_path}", flush=True)
+        return True
+
+    def _cb(self, indata, frames, time_info, status):
+        if status:
+            print(f"[blurt] meeting audio status: {status}", file=sys.stderr)
+        self._queue.put(indata.copy().reshape(-1))
+
+    def _on_stream_finished(self) -> None:
+        # Fires on normal stop (self._stop set → ignore) or on device removal,
+        # where we must finalize ourselves so the menu/timer reconcile.
+        if self._stop.is_set():
+            return
+        print("[blurt] meeting input ended unexpectedly; finalizing", file=sys.stderr)
+        threading.Thread(target=self.stop, daemon=True).start()
+
+    def _run(self) -> None:
+        chunk_target = int(MEETING_CHUNK_SEC * SAMPLE_RATE)
+        while True:
+            try:
+                block = self._queue.get(timeout=0.1)
+            except queue.Empty:
+                if self._stop.is_set():
+                    break
+                continue
+            try:
+                if self._wav is not None:
+                    self._wav.write(block)
+            except Exception as e:
+                print(f"[blurt] meeting wav write: {e}", file=sys.stderr)
+            self._chunk.append(block)
+            self._chunk_samples += block.shape[0]
+            if self._chunk_samples >= chunk_target:
+                self._flush_chunk()
+        self._flush_chunk()
+
+    def _flush_chunk(self) -> None:
+        if self._chunk_samples == 0:
+            return
+        audio = np.concatenate(self._chunk)
+        self._chunk, self._chunk_samples = [], 0
+        speech, _max_rms, _voiced = has_speech(audio)
+        if not speech:
+            return
+        try:
+            model = load_model()
+            result = _transcribe_array(model, audio)
+            text = cleanup(getattr(result, "text", str(result)).strip())
+            if text and self._txt_path is not None:
+                with open(self._txt_path, "a") as f:
+                    f.write(text + " ")
+        except Exception as e:
+            print(f"[blurt] meeting chunk transcribe: {e}", file=sys.stderr)
+
+    def stop(self) -> Path | None:
+        """Finalize: stop capture, drain, write footer, return the .txt path.
+
+        Idempotent and safe to call from the menu or the device-loss path.
+        """
+        with self._lock:
+            if self._done:
+                return self.last_output_path
+            self._done = True
+        self._stop.set()
+        if self._stream is not None:
+            try:
+                self._stream.stop()
+                self._stream.close()
+            except Exception as e:
+                print(f"[blurt] meeting stream close: {e}", file=sys.stderr)
+        if self._worker is not None:
+            self._worker.join(timeout=120.0)
+        if self._wav is not None:
+            try:
+                self._wav.close()
+            except Exception as e:
+                print(f"[blurt] meeting wav close: {e}", file=sys.stderr)
+        if self._txt_path is not None:
+            try:
+                end = datetime.now()
+                with open(self._txt_path, "a") as f:
+                    f.write(
+                        f"\n\n— ended {end.strftime('%H:%M')}, "
+                        f"duration {_fmt_hms(self.elapsed_at_stop())} —\n"
+                    )
+            except Exception as e:
+                print(f"[blurt] meeting footer write: {e}", file=sys.stderr)
+        self.last_output_path = self._txt_path
+        self._meeting_active.clear()
+        print(f"[blurt] meeting saved → {self._txt_path}", flush=True)
+        return self._txt_path
+
+    def elapsed_at_stop(self) -> float:
+        return time.monotonic() - self._start_mono if self._start_mono else 0.0
+
+    def _cleanup_outputs(self) -> None:
+        if self._wav is not None:
+            try:
+                self._wav.close()
+            except Exception:
+                pass
+            self._wav = None
 
 
 # --- self-update ------------------------------------------------------------
@@ -727,13 +930,18 @@ def has_launchagent() -> bool:
 class MenuApp(rumps.App):
     _SYSTEM_DEFAULT_LABEL = "System Default"
 
-    def __init__(self, hotkey: "Hotkey") -> None:
+    def __init__(self, hotkey: "Hotkey", recorder: "MeetingRecorder") -> None:
         super().__init__("blurt", title="🎙", quit_button=None)
         self.hotkey = hotkey
+        self.recorder = recorder
+        self._meeting_was_active = False
         self._mic_menu = rumps.MenuItem("Microphone")
         self._hotkey_menu = rumps.MenuItem("Hotkey")
         self._type_hotkey_menu = rumps.MenuItem("Type-mode Hotkey")
         self._clipboard_hotkey_menu = rumps.MenuItem("Clipboard Hotkey")
+        self._meeting_item = rumps.MenuItem(
+            "Start Meeting Recording", callback=self._on_meeting_toggle
+        )
         self._build_mic_menu()
         self._build_hotkey_menu()
         self._build_type_hotkey_menu()
@@ -764,6 +972,8 @@ class MenuApp(rumps.App):
             self._type_hotkey_menu,
             self._clipboard_hotkey_menu,
             None,  # separator
+            self._meeting_item,
+            None,
             self._version_item,
             self._update_item,
             None,
@@ -772,6 +982,7 @@ class MenuApp(rumps.App):
 
     @rumps.timer(0.1)
     def _tick(self, _):
+        self._reconcile_meeting()
         if self.title != STATE.title:
             self.title = STATE.title
         try:
@@ -782,7 +993,45 @@ class MenuApp(rumps.App):
         except queue.Empty:
             pass
 
+    def _reconcile_meeting(self) -> None:
+        """Keep the meeting menu label/icon in sync, and auto-open on stop.
+
+        Single source of truth for ending a meeting: whether the user clicked
+        Stop or the input device vanished, the falling edge here resets the UI
+        and opens the transcript exactly once.
+        """
+        active = self.recorder.is_active()
+        if active:
+            mm, ss = divmod(int(self.recorder.elapsed()), 60)
+            self._meeting_item.title = f"Stop Meeting Recording ({mm:02d}:{ss:02d})"
+            STATE.title = "⏺"
+        elif self._meeting_was_active:  # falling edge — meeting just ended
+            self._meeting_item.title = "Start Meeting Recording"
+            if STATE.title == "⏺":
+                STATE.title = "⚠️" if self.hotkey.disabled else "🎙"
+            path = self.recorder.last_output_path
+            if path is not None:
+                subprocess.Popen(
+                    ["open", str(path)],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                )
+        self._meeting_was_active = active
+
+    def _on_meeting_toggle(self, _sender) -> None:
+        if self.recorder.is_active():
+            threading.Thread(target=self.recorder.stop, daemon=True).start()
+            return
+        if self.hotkey._recording:
+            print("[blurt] can't start meeting: dictation in progress", file=sys.stderr)
+            return
+        if self.hotkey.disabled:
+            print("[blurt] can't start meeting: microphone unavailable", file=sys.stderr)
+            return
+        self.recorder.start(self.hotkey.device)
+
     def _quit(self, _):
+        if self.recorder.is_active():
+            self.recorder.stop()
         rumps.quit_application()
 
     # --- microphone submenu --------------------------------------------------
@@ -1070,13 +1319,16 @@ def main() -> int:
         disabled = True
         STATE.title = "⚠️"
 
+    meeting_active = threading.Event()
     hk = Hotkey(
         trigger_key=trigger_key,
         type_trigger_key=type_trigger_key,
         clipboard_trigger_key=clipboard_trigger_key,
         device=device,
+        meeting_active=meeting_active,
     )
     hk.disabled = disabled
+    recorder = MeetingRecorder(meeting_active)
 
     threading.Thread(target=load_model, daemon=True).start()
     listener = keyboard.Listener(on_press=hk.on_press, on_release=hk.on_release)
@@ -1084,13 +1336,15 @@ def main() -> int:
     print("[blurt] hold the configured hotkey to talk. ⌘-click menu bar to quit.", flush=True)
 
     def sigterm(*_):
+        if recorder.is_active():
+            recorder.stop()  # finalize the transcript + wav before exit
         listener.stop()
         rumps.quit_application()
 
     signal.signal(signal.SIGINT, sigterm)
     signal.signal(signal.SIGTERM, sigterm)
 
-    app = MenuApp(hotkey=hk)
+    app = MenuApp(hotkey=hk, recorder=recorder)
     app.startup_update_check()
     app.run()
     return 0

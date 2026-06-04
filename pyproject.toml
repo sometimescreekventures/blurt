@@ -6,6 +6,7 @@ requires-python = ">=3.11"
 dependencies = [
     "parakeet-mlx>=0.3.0",
     "sounddevice>=0.4.7",
+    "soundfile>=0.12",
     "numpy>=1.26",
     "pynput>=1.7.7",
     "rumps>=0.4.0",
