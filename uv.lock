@@ -107,6 +107,7 @@ dependencies = [
     { name = "pynput" },
     { name = "rumps" },
     { name = "sounddevice" },
+    { name = "soundfile" },
 ]
 
 [package.dev-dependencies]
@@ -121,6 +122,7 @@ requires-dist = [
     { name = "pynput", specifier = ">=1.7.7" },
     { name = "rumps", specifier = ">=0.4.0" },
     { name = "sounddevice", specifier = ">=0.4.7" },
+    { name = "soundfile", specifier = ">=0.12" },
 ]
 
 [package.metadata.requires-dev]

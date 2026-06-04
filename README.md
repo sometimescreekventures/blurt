@@ -121,6 +121,18 @@ blurt has three independently configurable hold-to-fire hotkeys, each selectable
 
 The two dictate hotkeys are interchangeable per utterance — hold whichever one suits the destination field. The keystroke paths (type and clipboard) both honor `TYPE_KEY_DELAY` for clients that drop fast input.
 
+### Meeting recording
+
+For long-form audio (a call, a lecture), use the **Start Meeting Recording** menu-bar item. It records from the currently selected input device, transcribes in ~30 s chunks as it goes, and saves a timestamped transcript you can paste into an AI or keep as notes.
+
+- Click **Start Meeting Recording** — the menu-bar icon shows `⏺` and the item becomes **Stop Meeting Recording (mm:ss)** with a live timer.
+- Click **Stop** — the transcript `.txt` opens automatically in your default editor. Both the transcript and the raw `.wav` are saved to `~/Documents/blurt-meetings/` (filename `YYYY-MM-DD-HH-MM-meeting.{txt,wav}`).
+- While a meeting is recording, the two **dictation** hotkeys are disabled (they share the mic); the **clipboard-type** hotkey still works.
+
+**Capturing the other participants.** By default this records your selected microphone, so it captures *you* clearly but remote voices only as faint speaker bleed. To capture everyone, install a virtual loopback device (e.g. [BlackHole](https://github.com/ExistentialAudio/BlackHole)), set up an aggregate/multi-output device so meeting audio plays to your speakers *and* into the loopback, then select that loopback in blurt's **Microphone** menu — no other changes needed.
+
+Knobs: `MEETING_DIR` and `MEETING_CHUNK_SEC` at the top of `blurt.py`. Chunks are fixed-length windows; very long words straddling a 30 s boundary may transcribe slightly worse (acceptable tradeoff for simplicity).
+
 ### Continuation spacing
 
 If you dictate two utterances within 15 s of each other, the second gets a leading space — so `"Hello."` + `"How are you?"` becomes `"Hello. How are you?"` rather than `"Hello.How are you?"`. After 15 s of idle, the next paste has no leading space (assumes you've moved to a new context). Tune via `CONTINUATION_SEC` in `blurt.py`.
