@@ -1026,6 +1026,39 @@ def watch_for_permission_grants(
         time.sleep(poll_sec)
 
 
+def ensure_permissions(meeting_active: threading.Event) -> bool:
+    """True if all TCC grants are present.
+
+    Otherwise: log what's missing, set the warning icon, and hand off to the
+    watcher thread (which prompts and polls). Startup continues either way —
+    the pynput listener still starts, matching pre-TCC-check behavior.
+    """
+    missing = [
+        name
+        for name, ok in (
+            ("Accessibility", accessibility_granted()),
+            ("Input Monitoring", input_monitoring_granted()),
+        )
+        if not ok
+    ]
+    if not missing:
+        return True
+    print(
+        f"[blurt] missing permissions: {', '.join(missing)} — requesting from macOS. "
+        "Approve the dialogs (or toggle blurt's python in System Settings → "
+        "Privacy & Security); blurt restarts itself once granted.",
+        file=sys.stderr,
+    )
+    STATE.title = "⚠️"
+    threading.Thread(
+        target=watch_for_permission_grants,
+        args=(lambda: accessibility_granted() and input_monitoring_granted(),),
+        kwargs={"meeting_active": meeting_active},
+        daemon=True,
+    ).start()
+    return False
+
+
 # --- menu bar ---------------------------------------------------------------
 
 class MenuApp(rumps.App):
@@ -1427,6 +1460,7 @@ def main() -> int:
         STATE.title = "⚠️"
 
     meeting_active = threading.Event()
+    ensure_permissions(meeting_active)
     hk = Hotkey(
         trigger_key=trigger_key,
         type_trigger_key=type_trigger_key,

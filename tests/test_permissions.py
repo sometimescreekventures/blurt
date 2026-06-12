@@ -129,3 +129,32 @@ def test_watcher_defers_restart_during_meeting():
     _watch(granted, meeting_active=meeting, restart=lambda: restarts.append(1))
     assert restarts == [1]
     assert state["n"] >= 2
+
+
+# --- ensure_permissions ---------------------------------------------------------
+
+def test_ensure_permissions_all_granted_no_watcher(monkeypatch):
+    monkeypatch.setattr(blurt, "accessibility_granted", lambda prompt=False: True)
+    monkeypatch.setattr(blurt, "input_monitoring_granted", lambda prompt=False: True)
+    started = []
+    monkeypatch.setattr(
+        blurt, "watch_for_permission_grants", lambda *a, **k: started.append(1)
+    )
+    blurt.STATE.title = "🎙"
+    assert blurt.ensure_permissions(threading.Event()) is True
+    assert started == []
+    assert blurt.STATE.title == "🎙"
+
+
+def test_ensure_permissions_missing_warns_and_watches(monkeypatch):
+    monkeypatch.setattr(blurt, "accessibility_granted", lambda prompt=False: False)
+    monkeypatch.setattr(blurt, "input_monitoring_granted", lambda prompt=False: True)
+    ran = threading.Event()
+    monkeypatch.setattr(
+        blurt, "watch_for_permission_grants", lambda *a, **k: ran.set()
+    )
+    blurt.STATE.title = "🎙"
+    assert blurt.ensure_permissions(threading.Event()) is False
+    assert ran.wait(2.0), "watcher thread did not start"
+    assert blurt.STATE.title == "⚠️"
+    blurt.STATE.title = "🎙"  # restore for other tests
