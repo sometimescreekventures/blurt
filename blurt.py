@@ -77,9 +77,12 @@ SOUND_VOLUME = "0.3"
 CONFIG_PATH = Path.home() / "Library" / "Application Support" / "blurt" / "config.json"
 REPO_ROOT = Path(__file__).resolve().parent
 
-# Self-update tracks this remote / branch via the menu-bar "Check for Updates" item.
+# Self-update follows a release channel: a floating git tag moved by
+# release.sh. "shout" = stable (default), "mumble" = beta. The checkout must
+# still be on UPDATE_BRANCH for updates to run.
 UPDATE_REMOTE = "origin"
 UPDATE_BRANCH = "main"
+UPDATE_CHANNELS = ("shout", "mumble")
 
 # Ordered list of (menu label, pynput Key attribute name).
 # Single source of truth for the Hotkey submenu and for config validation.
@@ -105,6 +108,7 @@ DEFAULT_CONFIG: dict = {
     "hotkey": "alt_r",
     "type_hotkey": "cmd_r",
     "clipboard_hotkey": "ctrl_l",
+    "update_channel": "shout",
 }
 
 
@@ -145,6 +149,15 @@ def load_config() -> dict:
                     f"using {DEFAULT_CONFIG[field]!r}",
                     file=sys.stderr,
                 )
+    if "update_channel" in raw:
+        if raw["update_channel"] in UPDATE_CHANNELS:
+            cfg["update_channel"] = raw["update_channel"]
+        else:
+            print(
+                f"[blurt] unknown update_channel {raw['update_channel']!r}; "
+                f"using {DEFAULT_CONFIG['update_channel']!r}",
+                file=sys.stderr,
+            )
     # Resolve collisions in priority order: hotkey wins, then type_hotkey,
     # then clipboard_hotkey. HOTKEY_CHOICES has far more entries than the three
     # keys, so a non-colliding fallback always exists.

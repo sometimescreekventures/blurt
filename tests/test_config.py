@@ -18,6 +18,7 @@ DEFAULTS = {
     "hotkey": "alt_r",
     "type_hotkey": "cmd_r",
     "clipboard_hotkey": "ctrl_l",
+    "update_channel": "shout",
 }
 
 
@@ -47,7 +48,23 @@ def test_load_config_valid_file(config_path):
         "hotkey": "f13",
         "type_hotkey": "f14",
         "clipboard_hotkey": "f15",
+        "update_channel": "shout",
     }
+
+
+def test_load_config_valid_channel(config_path):
+    import blurt
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text(json.dumps({"update_channel": "mumble"}))
+    assert blurt.load_config()["update_channel"] == "mumble"
+
+
+def test_load_config_unknown_channel_falls_back(config_path, capsys):
+    import blurt
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text(json.dumps({"update_channel": "scream"}))
+    assert blurt.load_config()["update_channel"] == "shout"
+    assert "update_channel" in capsys.readouterr().err.lower()
 
 
 def test_load_config_malformed_json_returns_defaults(config_path, capsys):
@@ -156,6 +173,7 @@ def test_save_config_round_trip(config_path):
         "hotkey": "f14",
         "type_hotkey": "f15",
         "clipboard_hotkey": "f16",
+        "update_channel": "mumble",
     }
     blurt.save_config(saved)
     assert blurt.load_config() == saved
