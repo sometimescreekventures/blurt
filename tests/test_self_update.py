@@ -148,6 +148,19 @@ def test_version_at_picks_highest(local_repo):
     assert blurt._version_at("HEAD", repo=local_repo) == "v0.2.0"
 
 
+def test_apply_update_wrong_branch(local_repo):
+    import blurt
+    _git(local_repo, "checkout", "-b", "feature-bar")
+    assert blurt.apply_update("shout").status == "wrong_branch"
+
+
+def test_apply_update_missing_channel_tag_is_fetch_failed(local_repo):
+    import blurt
+    _git(local_repo, "push", "origin", ":refs/tags/shout")
+    _git(local_repo, "tag", "-d", "shout")
+    assert blurt.apply_update("shout").status == "fetch_failed"
+
+
 # --- uv resolution ------------------------------------------------------------
 
 def test_uv_binary_prefers_path(monkeypatch):

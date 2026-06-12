@@ -828,14 +828,17 @@ def _version_at(commit: str, *, repo: Path | None = None) -> str:
 
 @functools.lru_cache(maxsize=1)
 def current_version() -> tuple[str, str]:
-    """Return (short_sha, iso_date) for the currently-running checkout.
+    """Return (version_label, iso_date) for the currently-running checkout.
 
-    Cached for the process lifetime — the daemon's SHA can't change without a restart.
+    The label is the release tag at HEAD (vX.Y.Z), or the short SHA for
+    untagged dev checkouts. Cached for the process lifetime — the daemon's
+    HEAD can't change without a restart.
     """
     try:
         sha = _git(["rev-parse", "--short", "HEAD"], timeout=2.0)
         date = _git(["show", "-s", "--format=%cs", "HEAD"], timeout=2.0)
-        return (sha, date)
+        label = _version_at("HEAD") or sha
+        return (label, date)
     except (RuntimeError, subprocess.TimeoutExpired, FileNotFoundError) as e:
         print(f"[blurt] current_version failed: {e}", file=sys.stderr)
         return ("unknown", "")
@@ -911,8 +914,11 @@ def _uv_binary() -> str:
     raise FileNotFoundError("uv not found on PATH or at ~/.local/bin/uv")
 
 
-def apply_update() -> ApplyResult:
-    """Fetch, reset, uv sync, restart. Refuses dirty checkouts and non-main branches."""
+def apply_update(channel: str = UPDATE_CHANNELS[0]) -> ApplyResult:
+    """Fetch tags, reset to the channel tag's commit, uv sync, restart.
+
+    Refuses dirty checkouts and non-main branches.
+    """
     try:
         branch = _git(["symbolic-ref", "--short", "HEAD"], timeout=2.0)
     except (RuntimeError, subprocess.TimeoutExpired) as e:
@@ -928,8 +934,10 @@ def apply_update() -> ApplyResult:
         return ApplyResult(status="dirty")
 
     try:
-        _git(["fetch", UPDATE_REMOTE, UPDATE_BRANCH], timeout=30.0)
-        _git(["reset", "--hard", f"{UPDATE_REMOTE}/{UPDATE_BRANCH}"], timeout=10.0)
+        _git(["fetch", UPDATE_REMOTE, "--tags", "--force"], timeout=30.0)
+        # Resolve once and reset to the SHA — immune to the tag moving mid-update.
+        target = _git(["rev-parse", f"{channel}^{{commit}}"], timeout=5.0)
+        _git(["reset", "--hard", target], timeout=10.0)
     except (RuntimeError, subprocess.TimeoutExpired) as e:
         return ApplyResult(status="fetch_failed", error=str(e))
 
