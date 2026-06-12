@@ -11,6 +11,7 @@ import json
 import os
 import queue
 import re
+import shutil
 import signal
 import subprocess
 import sys
@@ -845,6 +846,23 @@ def check_for_updates(repo: Path | None = None) -> UpdateCheck:
     )
 
 
+def _uv_binary() -> str:
+    """Resolve the uv executable to an absolute path.
+
+    Under the LaunchAgent the daemon inherits launchd's minimal PATH
+    (/usr/bin:/bin:/usr/sbin:/sbin), which doesn't include ~/.local/bin —
+    where the astral.sh installer used by install.sh puts uv. So a bare
+    "uv" exec fails when started by launchd; fall back there explicitly.
+    """
+    found = shutil.which("uv")
+    if found:
+        return found
+    fallback = Path.home() / ".local" / "bin" / "uv"
+    if fallback.exists():
+        return str(fallback)
+    raise FileNotFoundError("uv not found on PATH or at ~/.local/bin/uv")
+
+
 def apply_update() -> ApplyResult:
     """Fetch, reset, uv sync, restart. Refuses dirty checkouts and non-main branches."""
     try:
@@ -869,7 +887,7 @@ def apply_update() -> ApplyResult:
 
     try:
         proc = subprocess.run(
-            ["uv", "sync"],
+            [_uv_binary(), "sync"],
             cwd=str(REPO_ROOT),
             capture_output=True,
             text=True,
