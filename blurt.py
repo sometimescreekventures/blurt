@@ -14,7 +14,6 @@ import re
 import signal
 import subprocess
 import sys
-import textwrap
 import threading
 import time
 from dataclasses import dataclass
@@ -885,31 +884,28 @@ def apply_update() -> ApplyResult:
     return ApplyResult(status="restarting")
 
 
-def restart_daemon() -> None:
-    """Spawn a detached helper that bootstraps a fresh daemon, then exit ourselves.
+def restart_daemon(_exit: "Callable[[int], None]" = os._exit) -> None:
+    """Exit non-zero so the LaunchAgent relaunches us with the synced code.
 
-    We can't run `service.sh restart` inline — bootout SIGTERMs us mid-script.
+    The LaunchAgent plist sets KeepAlive={SuccessfulExit: false}: launchd
+    relaunches the job whenever it exits UN-successfully. So the canonical
+    self-restart is simply to die with a non-zero status and let launchd
+    revive us.
+
+    The earlier approach — spawn a detached `/tmp/blurt-restart.sh` helper,
+    then exit cleanly — was unreliable: a clean exit (0) tells KeepAlive NOT
+    to relaunch, and launchd reaps the job's descendants (even setsid'd ones)
+    when the daemon exits, so the helper was usually killed before it could run
+    `service.sh start`. The update content (git reset + uv sync) had already
+    landed, which is why a manual relaunch always "worked."
+
+    `os._exit` is used (not sys.exit) because this runs on a background thread:
+    it terminates the whole process immediately with the given status.
     """
-    service_sh = REPO_ROOT / "service.sh"
-    helper = Path("/tmp/blurt-restart.sh")
-    helper.write_text(
-        textwrap.dedent(f"""\
-            #!/bin/sh
-            sleep 2
-            exec "{service_sh}" start
-        """)
-    )
-    helper.chmod(0o755)
-    subprocess.Popen(
-        [str(helper)],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        start_new_session=True,
-    )
-    # Deliver SIGTERM to ourselves so the existing signal handler does cleanup
-    # (listener.stop + rumps.quit_application). Clean exit avoids fighting
-    # KeepAlive.SuccessfulExit=false in the LaunchAgent plist.
-    os.kill(os.getpid(), signal.SIGTERM)
+    print("[blurt] update applied; exiting for launchd to relaunch", flush=True)
+    sys.stdout.flush()
+    sys.stderr.flush()
+    _exit(1)
 
 
 def has_launchagent() -> bool:
@@ -1263,6 +1259,12 @@ class MenuApp(rumps.App):
 
     def _on_apply_update(self, _sender) -> None:
         if self.hotkey._recording:
+            return
+        if self.recorder.is_active():
+            # The update exits the process (launchd relaunches it); don't do
+            # that mid-meeting or we'd lose the in-progress recording.
+            print("[blurt] can't update: meeting recording in progress", file=sys.stderr)
+            self._set_update_label("Stop the meeting recording first", self._on_apply_update)
             return
         if not self._update_in_flight.acquire(blocking=False):
             return

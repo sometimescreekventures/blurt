@@ -89,35 +89,29 @@ If step 4 or 5 errors, set label to `Update failed — see logs`, return. Workin
 
 ### `restart_daemon` mechanism
 
-The daemon cannot directly run `service.sh restart` — `launchctl bootout` (the "stop" half) would SIGTERM us mid-script. Instead we spawn a detached helper and exit cleanly:
+> **Revised 2026-06-04 (bugfix).** The original detached-helper approach below
+> was unreliable in practice and has been replaced. See "Why the helper
+> approach failed."
 
 ```python
-def restart_daemon():
-    repo = Path(__file__).resolve().parent
-    service_sh = repo / "service.sh"
-    helper = Path("/tmp/blurt-restart.sh")
-    helper.write_text(textwrap.dedent(f"""\
-        #!/bin/sh
-        sleep 2
-        exec "{service_sh}" start
-    """))
-    helper.chmod(0o755)
-    subprocess.Popen(
-        [str(helper)],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        start_new_session=True,
-    )
-    rumps.quit_application()  # triggers clean exit
+def restart_daemon(_exit=os._exit):
+    print("[blurt] update applied; exiting for launchd to relaunch", flush=True)
+    sys.stdout.flush(); sys.stderr.flush()
+    _exit(1)  # non-zero → KeepAlive(SuccessfulExit=false) relaunches us
 ```
 
-Why this works:
+The LaunchAgent plist sets `KeepAlive = {SuccessfulExit: false}` (see [blurt.plist.template](../../../blurt.plist.template)): launchd relaunches the job whenever it exits **un**-successfully. So the canonical self-restart is to die with a non-zero status and let launchd revive the job — which then runs the freshly-synced code. Verified empirically: a non-zero/abnormal exit relaunches the job in ~0.5 s. `os._exit` (not `sys.exit`) is used because `restart_daemon` runs on a background worker thread; it terminates the whole process immediately. The `_exit` parameter is injected only so unit tests can assert the exit code without killing the test runner.
 
-- `start_new_session=True` puts the helper in its own process group so it survives our exit.
-- `rumps.quit_application()` triggers the existing `sigterm` cleanup path: listener stops, run loop returns, `main()` exits 0.
-- The LaunchAgent's `KeepAlive` is `{SuccessfulExit: false}` (see [blurt.plist.template](../../../blurt.plist.template)), so launchd does **not** auto-restart us on exit 0 — that would race with the helper.
-- The helper waits 2 s (ample buffer for our exit), then `service.sh start`, which is `launchctl bootstrap` followed by `launchctl kickstart -k`. `kickstart -k` force-launches a fresh instance.
-- Net downtime: roughly 2–3 s. The menu bar icon disappears and reappears.
+Normal quit (the "Quit blurt" menu item) and `launchctl bootout` still exit 0, so launchd does **not** relaunch in those cases — only the deliberate update path exits non-zero.
+
+#### Why the helper approach failed
+
+The original code spawned a detached `/tmp/blurt-restart.sh` (`sleep 2; service.sh start`) with `start_new_session=True`, then exited the daemon **cleanly (exit 0)**. Two compounding bugs:
+
+1. A clean exit (0) tells `KeepAlive{SuccessfulExit:false}` **not** to relaunch — so the restart depended entirely on the helper.
+2. launchd reaps a job's descendant processes when the job's main process exits — including `setsid`'d ones. `start_new_session=True` was not enough to escape this, so the helper was usually killed during its `sleep 2` before it could run `service.sh start`.
+
+Net effect: the git reset + `uv sync` landed, but nothing relaunched the daemon, so the user had to relaunch manually (which then showed the new version). The non-zero-exit approach removes the helper, the detached subprocess, and the race entirely. Net downtime: ~0.5–1 s.
 
 ### LaunchAgent-presence detection
 
