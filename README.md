@@ -30,7 +30,6 @@ cd blurt
 ./install.sh
 ./service.sh install && ./service.sh start
 ./permissions.sh                # walks you through Accessibility + Input Monitoring
-./make-app.sh                   # (optional) drops Blurt.app into ~/Applications
 ```
 
 `./permissions.sh` opens Finder with the Python binary preselected and walks you through the two settings panes one at a time. Microphone is granted automatically via an OS popup the first time you record. TCC permissions are per-machine and can't be fully scripted, but the helper does everything macOS allows.
@@ -46,11 +45,11 @@ On first launch the daemon downloads ~600 MB of Parakeet weights from Hugging Fa
 3. Creates a Python 3.12 virtualenv at `.venv/`.
 4. `uv sync`s the locked dependencies from `uv.lock`.
 
-`./service.sh install && ./service.sh start` renders a LaunchAgent plist into `~/Library/LaunchAgents/local.blurt.plist` and bootstraps it so blurt runs at login.
+`./service.sh install && ./service.sh start` renders a LaunchAgent plist into `~/Library/LaunchAgents/local.blurt.plist` and bootstraps it so blurt runs at login. Install also builds a thin `Blurt.app` launcher (custom icon) into `~/Applications` so you can restart the LaunchAgent by clicking an icon.
 
 `./permissions.sh` resolves the real Python binary path, reveals it in Finder, and opens Accessibility + Input Monitoring settings panes one at a time so you can drag-and-drop the binary into each.
 
-`./make-app.sh` (optional) renders a thin `Blurt.app` launcher into `~/Applications` so you can restart the LaunchAgent by clicking an icon. The bundle uses the custom icon in `Resources/Blurt.icns` and `exec`s `service.sh restart`.
+`./make-app.sh` rebuilds the `Blurt.app` launcher on its own — it runs automatically during `./service.sh install`, so you only need it directly if the repo moves. The bundle uses the custom icon in `Resources/Blurt.icns` and `exec`s `service.sh restart`.
 
 ### Running without a LaunchAgent
 
