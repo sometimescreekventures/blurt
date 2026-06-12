@@ -29,6 +29,21 @@ import soundfile as sf
 from pynput import keyboard
 from pynput.keyboard import Controller as KBController, Key
 
+# TCC permission APIs. Quartz ships with pynput; ApplicationServices is our
+# own dependency. If either is missing (unexpected macOS/pyobjc combo), the
+# permission checks below degrade to "assume granted" so startup never blocks.
+try:
+    from ApplicationServices import (
+        AXIsProcessTrusted,
+        AXIsProcessTrustedWithOptions,
+        kAXTrustedCheckOptionPrompt,
+    )
+    from Quartz import CGPreflightListenEventAccess, CGRequestListenEventAccess
+    _TCC_AVAILABLE = True
+except ImportError as _tcc_err:
+    print(f"[blurt] TCC APIs unavailable ({_tcc_err}); permission checks disabled", file=sys.stderr)
+    _TCC_AVAILABLE = False
+
 SAMPLE_RATE = 16_000
 CHANNELS = 1
 BLOCK_SEC = 0.05
@@ -36,6 +51,7 @@ MIN_HOLD_SEC = 0.2
 MIN_AUDIO_SEC = 0.15
 CLIPBOARD_RESTORE_DELAY = 0.8
 CONTINUATION_SEC = 15.0  # if within this since last paste, prepend a space
+PERMISSION_POLL_SEC = 5.0  # how often to re-check TCC grants while missing
 
 # Per-character delay for type-mode delivery. Default 0 (let pynput burst as
 # fast as macOS allows). Bump to 0.005–0.01 if a slow VDI drops characters.
@@ -937,6 +953,38 @@ def has_launchagent() -> bool:
         return True
     except (subprocess.CalledProcessError, OSError, subprocess.TimeoutExpired):
         return False
+
+
+# --- permissions --------------------------------------------------------------
+
+def accessibility_granted(prompt: bool = False) -> bool:
+    """True if the Accessibility (AX) grant is present.
+
+    prompt=True additionally shows the macOS grant dialog (at most once per
+    binary per TCC state) and registers the binary in the settings pane.
+    """
+    if not _TCC_AVAILABLE:
+        return True
+    try:
+        if prompt:
+            return bool(AXIsProcessTrustedWithOptions({kAXTrustedCheckOptionPrompt: True}))
+        return bool(AXIsProcessTrusted())
+    except Exception as e:
+        print(f"[blurt] accessibility check failed ({e}); assuming granted", file=sys.stderr)
+        return True
+
+
+def input_monitoring_granted(prompt: bool = False) -> bool:
+    """True if the Input Monitoring grant is present. prompt=True as above."""
+    if not _TCC_AVAILABLE:
+        return True
+    try:
+        if prompt:
+            return bool(CGRequestListenEventAccess())
+        return bool(CGPreflightListenEventAccess())
+    except Exception as e:
+        print(f"[blurt] input monitoring check failed ({e}); assuming granted", file=sys.stderr)
+        return True
 
 
 # --- menu bar ---------------------------------------------------------------
