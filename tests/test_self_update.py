@@ -1,12 +1,23 @@
+import os
 import subprocess
 from pathlib import Path
 
 import pytest
 
+# Ignore the user's global/system git config (commit signing, hooks, etc.) so
+# fixture commits work in any environment — e.g. 1Password-backed signing
+# can't run non-interactively and would fail every commit.
+_GIT_ENV = {
+    **os.environ,
+    "GIT_CONFIG_GLOBAL": os.devnull,
+    "GIT_CONFIG_SYSTEM": os.devnull,
+}
+
 
 def _git(repo: Path, *args: str) -> str:
     proc = subprocess.run(
-        ["git", *args], cwd=str(repo), capture_output=True, text=True, check=True
+        ["git", *args], cwd=str(repo), capture_output=True, text=True, check=True,
+        env=_GIT_ENV,
     )
     return proc.stdout.strip()
 
@@ -25,8 +36,12 @@ def local_repo(tmp_path: Path, monkeypatch):
     poke check_for_updates."""
     remote = tmp_path / "remote.git"
     local = tmp_path / "local"
-    subprocess.run(["git", "init", "--bare", str(remote)], check=True, capture_output=True)
-    subprocess.run(["git", "init", "-b", "main", str(local)], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "init", "--bare", str(remote)], check=True, capture_output=True, env=_GIT_ENV
+    )
+    subprocess.run(
+        ["git", "init", "-b", "main", str(local)], check=True, capture_output=True, env=_GIT_ENV
+    )
     _commit(local, "initial")
     _git(local, "remote", "add", "origin", str(remote))
     _git(local, "push", "-u", "origin", "main")
@@ -49,7 +64,7 @@ def test_check_for_updates_update_available(local_repo, tmp_path):
     clone = tmp_path / "pusher"
     subprocess.run(
         ["git", "clone", _git(local_repo, "remote", "get-url", "origin"), str(clone)],
-        check=True, capture_output=True,
+        check=True, capture_output=True, env=_GIT_ENV,
     )
     _commit(clone, "remote update")
     _git(clone, "push", "origin", "main")
