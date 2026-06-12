@@ -6,7 +6,7 @@ Hold **Right Option (⌥)**, speak, release — text pastes at your cursor.
 
 - **Fast.** ~60–360 ms end-to-end for 1–10 s utterances on an M-series Mac.
 - **Local.** No cloud, no API keys, no network traffic after model download.
-- **Small.** A single ~1,400-line Python file, one background daemon, one menu-bar icon.
+- **Small.** A single ~1,600-line Python file, one background daemon, one menu-bar icon.
 
 Built on [parakeet-mlx](https://github.com/senstella/parakeet-mlx) (Apple-Silicon port of NVIDIA's Parakeet-TDT) with [MLX](https://github.com/ml-explore/mlx), [sounddevice](https://python-sounddevice.readthedocs.io/) for mic capture, [pynput](https://pynput.readthedocs.io/) for the global hotkey, and [rumps](https://github.com/jaredks/rumps) for the menu bar.
 
@@ -59,7 +59,7 @@ If you just want to try it first:
 uv run python blurt.py
 ```
 
-macOS will prompt for **Microphone** permission the first time you hold the hotkey — approve it. The terminal will show `This process is not trusted!` until you grant **Accessibility** and **Input Monitoring** — see [Permissions](#permissions).
+blurt requests **Accessibility** and **Input Monitoring** itself at startup (without a LaunchAgent it can't self-restart — rerun it after granting), and macOS prompts for **Microphone** the first time you hold the hotkey. See [Permissions](#permissions).
 
 ### Managing the service
 
@@ -79,7 +79,7 @@ For routine updates you don't need the terminal at all — see [Updating](#updat
 ./uninstall.sh --full   # + model weights cache + this checkout itself
 ```
 
-Both modes print the TCC entries to remove by hand (macOS doesn't let scripts touch permission grants — and the grants attach to the uv-managed python binary, *not* the repo, so deleting the checkout alone does not reset them). `--full` opens the System Settings pane for you and is the right mode before testing a from-scratch `setup.sh`. uv and its pythons are left alone since other projects may share them.
+Both modes print the TCC entries to remove by hand (macOS doesn't let scripts touch permission grants — and the grants attach to the uv-managed python binary, *not* the repo, so deleting the checkout alone does not reset them). `--full` opens the System Settings pane for you and is the right mode before testing a from-scratch `setup.sh` (it deletes the directory your shell is standing in — `cd ~` before recloning). uv and its pythons are left alone since other projects may share them.
 
 ### Updating
 
@@ -117,7 +117,7 @@ Every release is an immutable `vX.Y.Z` tag plus a GitHub Release with notes auto
 
 You need three TCC permissions granted to the Python interpreter that runs `blurt.py`. **You normally don't do anything manual here**: on startup blurt checks its grants and asks macOS for whatever is missing — the binary self-registers in the right panes, you flip the toggles in the OS dialogs, and blurt restarts itself. The menu-bar icon shows `⚠️` until the grants land. The rest of this section is fallback material: `./permissions.sh` walks the drag-and-drop path if the dialogs were dismissed, and the details below help if something is still stuck.
 
-**Which Python?** `./service.sh install` prints the real path — typically something like:
+**Which Python?** `./permissions.sh` (and `./uninstall.sh`) print the real path — or run `readlink -f .venv/bin/python`. Typically something like:
 
 ```
 /Users/<you>/.local/share/uv/python/cpython-3.12-macos-aarch64-none/bin/python3.12
@@ -151,9 +151,9 @@ If you're just running `uv run python blurt.py` interactively from Terminal, you
 4. Release Right Option — Pop sound plays, menu bar shows `✨` briefly while transcribing.
 5. Text pastes at your cursor.
 
-Icon legend: `🎙` idle · `🔴` recording · `✨` transcribing · `⌨️` typing out the clipboard · `⏺` meeting recording · `⚠️` error (mic missing or stream failure — check logs).
+Icon legend: `🎙` idle · `🔴` recording · `✨` transcribing · `⌨️` typing out the clipboard · `⏺` meeting recording · `⚠️` needs attention (missing permissions, mic missing, or stream failure — check logs).
 
-The menu also has a **Microphone** submenu (pick a specific input device or System Default; **Refresh devices** rescans after plugging one in), the three hotkey submenus, the meeting-recorder toggle, and the version / update items described in [Updating](#updating).
+The menu also has a **Microphone** submenu (pick a specific input device or System Default; **Refresh devices** rescans after plugging one in), the three hotkey submenus, the **Channel** picker (Shout/Mumble), the meeting-recorder toggle, and the version / update items described in [Updating](#updating).
 
 ### Three hotkeys
 
@@ -224,6 +224,7 @@ One process, a handful of threads:
 - **Transcription worker (one per utterance)** — spawned on release; runs Parakeet, runs cleanup, pastes or types.
 - **Meeting worker (while a meeting is recording)** — drains the audio queue, streams to the WAV, transcribes ~30 s chunks, appends to the transcript.
 - **Update worker (per check/apply)** — runs the git/uv steps off the UI thread; results marshal back via the UI queue.
+- **Permission watcher (only while grants are missing)** — fires the TCC prompts, polls every 5 s, and restarts the daemon once everything is granted.
 
 A single `_mlx_lock` serializes all MLX compute — Metal command buffers aren't safe to encode from multiple threads concurrently (we hit `A command encoder is already encoding` asserts without it).
 
