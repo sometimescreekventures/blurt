@@ -1103,16 +1103,19 @@ def ensure_permissions(meeting_active: threading.Event) -> bool:
 
 class MenuApp(rumps.App):
     _SYSTEM_DEFAULT_LABEL = "System Default"
+    _CHANNEL_LABELS = {"shout": "🗣️ Shout (stable)", "mumble": "🤫 Mumble (beta)"}
 
-    def __init__(self, hotkey: "Hotkey", recorder: "MeetingRecorder") -> None:
+    def __init__(self, hotkey: "Hotkey", recorder: "MeetingRecorder", channel: str) -> None:
         super().__init__("blurt", title="🎙", quit_button=None)
         self.hotkey = hotkey
         self.recorder = recorder
+        self._channel = channel
         self._meeting_was_active = False
         self._mic_menu = rumps.MenuItem("Microphone")
         self._hotkey_menu = rumps.MenuItem("Hotkey")
         self._type_hotkey_menu = rumps.MenuItem("Type-mode Hotkey")
         self._clipboard_hotkey_menu = rumps.MenuItem("Clipboard Hotkey")
+        self._channel_menu = rumps.MenuItem("Channel")
         self._meeting_item = rumps.MenuItem(
             "Start Meeting Recording", callback=self._on_meeting_toggle
         )
@@ -1120,11 +1123,10 @@ class MenuApp(rumps.App):
         self._build_hotkey_menu()
         self._build_type_hotkey_menu()
         self._build_clipboard_hotkey_menu()
+        self._build_channel_menu()
         self._refresh_hotkey_greyouts()
 
-        sha, date = current_version()
-        version_label = f"Version: {sha}" + (f" ({date})" if date else "")
-        self._version_item = rumps.MenuItem(version_label)  # no callback → disabled
+        self._version_item = rumps.MenuItem(self._version_text())  # no callback → disabled
         self._has_launchagent = has_launchagent()
         if self._has_launchagent:
             self._update_item = rumps.MenuItem(
@@ -1145,6 +1147,7 @@ class MenuApp(rumps.App):
             self._hotkey_menu,
             self._type_hotkey_menu,
             self._clipboard_hotkey_menu,
+            self._channel_menu,
             None,  # separator
             self._meeting_item,
             None,
@@ -1389,9 +1392,37 @@ class MenuApp(rumps.App):
             "hotkey": self._current_hotkey_attr(),
             "type_hotkey": self._current_type_hotkey_attr(),
             "clipboard_hotkey": self._current_clipboard_hotkey_attr(),
+            "update_channel": self._channel,
         }
         cfg.update(overrides)
         return cfg
+
+    # --- channel submenu ------------------------------------------------------
+
+    def _version_text(self) -> str:
+        label, date = current_version()
+        text = f"Version: {label}" + (f" ({date})" if date else "")
+        return f"{text} · {self._channel}"
+
+    def _build_channel_menu(self) -> None:
+        for channel in UPDATE_CHANNELS:
+            item = rumps.MenuItem(self._CHANNEL_LABELS[channel], callback=self._on_channel_pick)
+            item.state = 1 if channel == self._channel else 0
+            self._channel_menu.add(item)
+
+    def _on_channel_pick(self, sender) -> None:
+        label = str(sender.title)
+        match = next((ch for ch, lbl in self._CHANNEL_LABELS.items() if lbl == label), None)
+        if match is None or match == self._channel:
+            return
+        self._channel = match
+        save_config(self._current_config(update_channel=match))
+        for item in self._channel_menu.values():
+            if isinstance(item, rumps.MenuItem):
+                item.state = 1 if str(item.title) == label else 0
+        self._version_item.title = self._version_text()
+        # Show immediately what this channel offers (may be a downgrade).
+        self._on_check_updates(None)
 
     # --- self-update --------------------------------------------------------
 
@@ -1407,7 +1438,7 @@ class MenuApp(rumps.App):
 
     def _check_updates_worker(self) -> None:
         try:
-            result = check_for_updates()
+            result = check_for_updates(self._channel)
             self._render_check_result(result)
         finally:
             self._update_in_flight.release()
@@ -1422,10 +1453,15 @@ class MenuApp(rumps.App):
                 lambda: self._set_update_label("Check for Updates", self._on_check_updates),
             ).start()
         elif result.status == "update_available":
-            label = (
-                f"Update to {result.remote_sha} ({result.commits_behind} commit"
-                f"{'s' if result.commits_behind != 1 else ''} behind)"
-            )
+            name = result.version or result.remote_sha
+            if result.commits_behind:
+                label = (
+                    f"Update to {name} ({result.commits_behind} commit"
+                    f"{'s' if result.commits_behind != 1 else ''} behind)"
+                )
+            else:
+                # Cross-channel move or downgrade — different, not newer.
+                label = f"Switch to {name}"
             self._set_update_label(label, self._on_apply_update)
         elif result.status == "dirty":
             self._set_update_label("Update unavailable: local changes", None)
@@ -1451,7 +1487,7 @@ class MenuApp(rumps.App):
 
     def _apply_update_worker(self) -> None:
         try:
-            result = apply_update()
+            result = apply_update(self._channel)
             if result.status == "restarting":
                 # restart_daemon already signalled SIGTERM; nothing more to do.
                 return
@@ -1525,7 +1561,7 @@ def main() -> int:
     signal.signal(signal.SIGINT, sigterm)
     signal.signal(signal.SIGTERM, sigterm)
 
-    app = MenuApp(hotkey=hk, recorder=recorder)
+    app = MenuApp(hotkey=hk, recorder=recorder, channel=cfg["update_channel"])
     app.startup_update_check()
     app.run()
     return 0
