@@ -29,6 +29,21 @@ import soundfile as sf
 from pynput import keyboard
 from pynput.keyboard import Controller as KBController, Key
 
+# TCC permission APIs. Quartz ships with pynput; ApplicationServices is our
+# own dependency. If either is missing (unexpected macOS/pyobjc combo), the
+# permission checks below degrade to "assume granted" so startup never blocks.
+try:
+    from ApplicationServices import (
+        AXIsProcessTrusted,
+        AXIsProcessTrustedWithOptions,
+        kAXTrustedCheckOptionPrompt,
+    )
+    from Quartz import CGPreflightListenEventAccess, CGRequestListenEventAccess
+    _TCC_AVAILABLE = True
+except ImportError as _tcc_err:
+    print(f"[blurt] TCC APIs unavailable ({_tcc_err}); permission checks disabled", file=sys.stderr)
+    _TCC_AVAILABLE = False
+
 SAMPLE_RATE = 16_000
 CHANNELS = 1
 BLOCK_SEC = 0.05
@@ -36,6 +51,7 @@ MIN_HOLD_SEC = 0.2
 MIN_AUDIO_SEC = 0.15
 CLIPBOARD_RESTORE_DELAY = 0.8
 CONTINUATION_SEC = 15.0  # if within this since last paste, prepend a space
+PERMISSION_POLL_SEC = 5.0  # how often to re-check TCC grants while missing
 
 # Per-character delay for type-mode delivery. Default 0 (let pynput burst as
 # fast as macOS allows). Bump to 0.005–0.01 if a slow VDI drops characters.
@@ -939,6 +955,110 @@ def has_launchagent() -> bool:
         return False
 
 
+# --- permissions --------------------------------------------------------------
+
+def accessibility_granted(prompt: bool = False) -> bool:
+    """True if the Accessibility (AX) grant is present.
+
+    prompt=True additionally shows the macOS grant dialog (at most once per
+    binary per TCC state) and registers the binary in the settings pane.
+    """
+    if not _TCC_AVAILABLE:
+        return True
+    try:
+        if prompt:
+            return bool(AXIsProcessTrustedWithOptions({kAXTrustedCheckOptionPrompt: True}))
+        return bool(AXIsProcessTrusted())
+    except Exception as e:
+        print(f"[blurt] accessibility check failed ({e}); assuming granted", file=sys.stderr)
+        return True
+
+
+def input_monitoring_granted(prompt: bool = False) -> bool:
+    """True if the Input Monitoring grant is present. prompt=True as above."""
+    if not _TCC_AVAILABLE:
+        return True
+    try:
+        if prompt:
+            return bool(CGRequestListenEventAccess())
+        return bool(CGPreflightListenEventAccess())
+    except Exception as e:
+        print(f"[blurt] input monitoring check failed ({e}); assuming granted", file=sys.stderr)
+        return True
+
+
+def request_missing_permissions() -> None:
+    """Fire the OS grant dialog for each permission that is missing."""
+    if not accessibility_granted():
+        accessibility_granted(prompt=True)
+    if not input_monitoring_granted():
+        input_monitoring_granted(prompt=True)
+
+
+def watch_for_permission_grants(
+    granted: Callable[[], bool],
+    *,
+    request: Callable[[], None] = request_missing_permissions,
+    has_agent: Callable[[], bool] = has_launchagent,
+    meeting_active: threading.Event,
+    restart: Callable[[], None] = restart_daemon,
+    poll_sec: float = PERMISSION_POLL_SEC,
+) -> None:
+    """Prompt for missing grants, poll until they land, then restart.
+
+    Runs on a daemon thread (spawned by ensure_permissions) so the OS dialogs
+    can never block startup. Once granted: under the LaunchAgent we exit
+    non-zero so launchd relaunches us with the grants effective (Input
+    Monitoring only applies to a fresh process); interactively we can only
+    tell the user to restart. A live meeting recording defers the restart —
+    same guard as self-update.
+    """
+    request()
+    while True:
+        if granted():
+            if not has_agent():
+                print("[blurt] permissions granted; restart blurt to pick them up", flush=True)
+                return
+            if not meeting_active.is_set():
+                print("[blurt] permissions granted; restarting", flush=True)
+                restart()
+                return
+        time.sleep(poll_sec)
+
+
+def ensure_permissions(meeting_active: threading.Event) -> bool:
+    """True if all TCC grants are present.
+
+    Otherwise: log what's missing, set the warning icon, and hand off to the
+    watcher thread (which prompts and polls). Startup continues either way —
+    the pynput listener still starts, matching pre-TCC-check behavior.
+    """
+    missing = [
+        name
+        for name, ok in (
+            ("Accessibility", accessibility_granted()),
+            ("Input Monitoring", input_monitoring_granted()),
+        )
+        if not ok
+    ]
+    if not missing:
+        return True
+    print(
+        f"[blurt] missing permissions: {', '.join(missing)} — requesting from macOS. "
+        "Approve the dialogs (or toggle blurt's python in System Settings → "
+        "Privacy & Security); blurt restarts itself once granted.",
+        file=sys.stderr,
+    )
+    STATE.title = "⚠️"
+    threading.Thread(
+        target=watch_for_permission_grants,
+        args=(lambda: accessibility_granted() and input_monitoring_granted(),),
+        kwargs={"meeting_active": meeting_active},
+        daemon=True,
+    ).start()
+    return False
+
+
 # --- menu bar ---------------------------------------------------------------
 
 class MenuApp(rumps.App):
@@ -1340,6 +1460,7 @@ def main() -> int:
         STATE.title = "⚠️"
 
     meeting_active = threading.Event()
+    ensure_permissions(meeting_active)
     hk = Hotkey(
         trigger_key=trigger_key,
         type_trigger_key=type_trigger_key,

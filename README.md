@@ -27,16 +27,16 @@ All other dependencies are installed by `./install.sh`.
 ```bash
 git clone https://github.com/sometimescreekventures/blurt.git
 cd blurt
-./install.sh
-./service.sh install && ./service.sh start
-./permissions.sh                # walks you through Accessibility + Input Monitoring
+./setup.sh
 ```
 
-`./permissions.sh` opens Finder with the Python binary preselected and walks you through the two settings panes one at a time. Microphone is granted automatically via an OS popup the first time you record. TCC permissions are per-machine and can't be fully scripted, but the helper does everything macOS allows.
+`setup.sh` installs the toolchain and the LaunchAgent, then blurt itself asks macOS for the permissions it needs — approve the **Accessibility** and **Input Monitoring** dialogs (blurt restarts itself once both are granted), and click Allow on the **Microphone** popup the first time you dictate. TCC grants are per-machine and can't be scripted, but two toggles is as small as macOS lets it get. If you dismissed the dialogs, run `./permissions.sh` for a guided walkthrough.
 
 On first launch the daemon downloads ~600 MB of Parakeet weights from Hugging Face (one-time). After that, cold-start is ~10 s.
 
 ### What each step does
+
+`./setup.sh` runs the steps below in order — it's all most installs need.
 
 `./install.sh`:
 
@@ -47,7 +47,7 @@ On first launch the daemon downloads ~600 MB of Parakeet weights from Hugging Fa
 
 `./service.sh install && ./service.sh start` renders a LaunchAgent plist into `~/Library/LaunchAgents/local.blurt.plist` and bootstraps it so blurt runs at login. Install also builds a thin `Blurt.app` launcher (custom icon) into `~/Applications` so you can restart the LaunchAgent by clicking an icon.
 
-`./permissions.sh` resolves the real Python binary path, reveals it in Finder, and opens Accessibility + Input Monitoring settings panes one at a time so you can drag-and-drop the binary into each.
+`./permissions.sh` is the manual fallback for permissions: it resolves the real Python binary path, reveals it in Finder, and opens the Accessibility + Input Monitoring settings panes one at a time so you can drag-and-drop the binary into each. Normally blurt's own startup prompts make this unnecessary.
 
 `./make-app.sh` rebuilds the `Blurt.app` launcher on its own — it runs automatically during `./service.sh install`, so you only need it directly if the repo moves. The bundle uses the custom icon in `Resources/Blurt.icns` and `exec`s `service.sh restart`.
 
@@ -89,7 +89,7 @@ If `uv sync` fails, the label shows `Update failed — see logs` and the daemon 
 
 ## Permissions
 
-You need to grant three permissions to the Python interpreter that runs `blurt.py`. The fast path is `./permissions.sh` — it opens Finder with the Python binary preselected, then opens each of the two manual settings panes in turn so you can drag-and-drop. The rest of this section is reference material if the helper isn't enough.
+You need three TCC permissions granted to the Python interpreter that runs `blurt.py`. **You normally don't do anything manual here**: on startup blurt checks its grants and asks macOS for whatever is missing — the binary self-registers in the right panes, you flip the toggles in the OS dialogs, and blurt restarts itself. The menu-bar icon shows `⚠️` until the grants land. The rest of this section is fallback material: `./permissions.sh` walks the drag-and-drop path if the dialogs were dismissed, and the details below help if something is still stuck.
 
 **Which Python?** `./service.sh install` prints the real path — typically something like:
 
@@ -221,6 +221,8 @@ Could be. Keeping it a single `.py` file under a LaunchAgent is easier to hack o
 **Transcription is empty for all utterances.** Usually means audio isn't reaching the model. Check System Settings → Privacy & Security → Microphone, ensure the Python binary is allowed. Also check the system default input device has non-zero level.
 
 **Paste lands in the wrong place.** Keep focus in the target text field until you hear the Pop sound. Paste happens ~100–400 ms after release.
+
+**blurt stopped working after an update (hotkeys dead, `⚠️` in menu bar).** A uv Python upgrade can change the interpreter's path, which makes macOS forget the Accessibility / Input Monitoring grants. blurt detects this at startup and re-fires the permission dialogs — flip the toggles and it restarts itself. (`./service.sh logs` shows `missing permissions: …` when this is the cause.)
 
 **Menu-bar update says `Update failed — see logs`.** Run `./service.sh logs`. If the error is `uv sync` related, the checkout is already on the new commit — run `uv sync` from the repo and then `./service.sh restart`. A `fetch` failure usually means no network; the daemon stays on the old code and you can just retry.
 
