@@ -789,6 +789,8 @@ class UpdateCheck:
     local_sha: str = ""
     remote_sha: str = ""
     commits_behind: int = 0
+    version: str = ""  # vX.Y.Z at the channel commit, "" if untagged
+    channel: str = ""
     error: str = ""
 
 
@@ -812,6 +814,18 @@ def _git(args: list[str], *, repo: Path | None = None, timeout: float = 10.0) ->
     return proc.stdout.strip()
 
 
+def _version_at(commit: str, *, repo: Path | None = None) -> str:
+    """Highest v* tag pointing at `commit`, or '' if none."""
+    try:
+        tags = _git(
+            ["tag", "--points-at", commit, "--list", "v*", "--sort=-v:refname"],
+            repo=repo, timeout=5.0,
+        )
+    except (RuntimeError, subprocess.TimeoutExpired):
+        return ""
+    return tags.splitlines()[0] if tags else ""
+
+
 @functools.lru_cache(maxsize=1)
 def current_version() -> tuple[str, str]:
     """Return (short_sha, iso_date) for the currently-running checkout.
@@ -827,52 +841,57 @@ def current_version() -> tuple[str, str]:
         return ("unknown", "")
 
 
-def check_for_updates(repo: Path | None = None) -> UpdateCheck:
-    """Fetch origin and compare local HEAD to origin/main."""
+def check_for_updates(channel: str = UPDATE_CHANNELS[0], repo: Path | None = None) -> UpdateCheck:
+    """Fetch tags and compare local HEAD to the channel's floating tag."""
     repo = repo or REPO_ROOT
     try:
         branch = _git(["symbolic-ref", "--short", "HEAD"], repo=repo, timeout=2.0)
     except (RuntimeError, subprocess.TimeoutExpired) as e:
-        return UpdateCheck(status="check_failed", error=str(e))
+        return UpdateCheck(status="check_failed", channel=channel, error=str(e))
     if branch != UPDATE_BRANCH:
-        return UpdateCheck(status="wrong_branch", error=f"on {branch}, expected {UPDATE_BRANCH}")
+        return UpdateCheck(
+            status="wrong_branch", channel=channel,
+            error=f"on {branch}, expected {UPDATE_BRANCH}",
+        )
     try:
         dirty = _git(["status", "--porcelain", "--untracked-files=no"], repo=repo, timeout=5.0)
     except (RuntimeError, subprocess.TimeoutExpired) as e:
-        return UpdateCheck(status="check_failed", error=str(e))
+        return UpdateCheck(status="check_failed", channel=channel, error=str(e))
     try:
-        _git(["fetch", UPDATE_REMOTE, UPDATE_BRANCH], repo=repo, timeout=15.0)
+        # --force: the floating channel tags move between releases.
+        _git(["fetch", UPDATE_REMOTE, "--tags", "--force"], repo=repo, timeout=15.0)
     except (RuntimeError, subprocess.TimeoutExpired) as e:
-        return UpdateCheck(status="check_failed", error=str(e))
+        return UpdateCheck(status="check_failed", channel=channel, error=str(e))
     try:
         local_sha = _git(["rev-parse", "--short", "HEAD"], repo=repo, timeout=2.0)
+    except (RuntimeError, subprocess.TimeoutExpired) as e:
+        return UpdateCheck(status="check_failed", channel=channel, error=str(e))
+    try:
         remote_sha = _git(
-            ["rev-parse", "--short", f"{UPDATE_REMOTE}/{UPDATE_BRANCH}"], repo=repo, timeout=2.0
+            ["rev-parse", "--short", f"{channel}^{{commit}}"], repo=repo, timeout=2.0
         )
+    except (RuntimeError, subprocess.TimeoutExpired):
+        return UpdateCheck(
+            status="check_failed", channel=channel, local_sha=local_sha,
+            error=f"channel tag {channel!r} not found — cut a release first",
+        )
+    version = _version_at(remote_sha, repo=repo)
+    try:
         behind = int(
-            _git(
-                ["rev-list", "--count", f"HEAD..{UPDATE_REMOTE}/{UPDATE_BRANCH}"],
-                repo=repo,
-                timeout=5.0,
-            )
+            _git(["rev-list", "--count", f"HEAD..{channel}^{{commit}}"], repo=repo, timeout=5.0)
         )
     except (RuntimeError, subprocess.TimeoutExpired, ValueError) as e:
-        return UpdateCheck(status="check_failed", error=str(e))
+        return UpdateCheck(status="check_failed", channel=channel, error=str(e))
 
-    if dirty:
-        return UpdateCheck(
-            status="dirty", local_sha=local_sha, remote_sha=remote_sha, commits_behind=behind
-        )
-    if behind == 0:
-        return UpdateCheck(
-            status="up_to_date", local_sha=local_sha, remote_sha=remote_sha, commits_behind=0
-        )
-    return UpdateCheck(
-        status="update_available",
-        local_sha=local_sha,
-        remote_sha=remote_sha,
-        commits_behind=behind,
+    common = dict(
+        local_sha=local_sha, remote_sha=remote_sha,
+        commits_behind=behind, version=version, channel=channel,
     )
+    if dirty:
+        return UpdateCheck(status="dirty", **common)
+    if remote_sha == local_sha:
+        return UpdateCheck(status="up_to_date", **common)
+    return UpdateCheck(status="update_available", **common)
 
 
 def _uv_binary() -> str:
