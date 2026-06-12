@@ -987,6 +987,45 @@ def input_monitoring_granted(prompt: bool = False) -> bool:
         return True
 
 
+def request_missing_permissions() -> None:
+    """Fire the OS grant dialog for each permission that is missing."""
+    if not accessibility_granted():
+        accessibility_granted(prompt=True)
+    if not input_monitoring_granted():
+        input_monitoring_granted(prompt=True)
+
+
+def watch_for_permission_grants(
+    granted: Callable[[], bool],
+    *,
+    request: Callable[[], None] = request_missing_permissions,
+    has_agent: Callable[[], bool] = has_launchagent,
+    meeting_active: threading.Event,
+    restart: Callable[[], None] = restart_daemon,
+    poll_sec: float = PERMISSION_POLL_SEC,
+) -> None:
+    """Prompt for missing grants, poll until they land, then restart.
+
+    Runs on a daemon thread (spawned by ensure_permissions) so the OS dialogs
+    can never block startup. Once granted: under the LaunchAgent we exit
+    non-zero so launchd relaunches us with the grants effective (Input
+    Monitoring only applies to a fresh process); interactively we can only
+    tell the user to restart. A live meeting recording defers the restart —
+    same guard as self-update.
+    """
+    request()
+    while True:
+        if granted():
+            if not has_agent():
+                print("[blurt] permissions granted; restart blurt to pick them up", flush=True)
+                return
+            if not meeting_active.is_set():
+                print("[blurt] permissions granted; restarting", flush=True)
+                restart()
+                return
+        time.sleep(poll_sec)
+
+
 # --- menu bar ---------------------------------------------------------------
 
 class MenuApp(rumps.App):
