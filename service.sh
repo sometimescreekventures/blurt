@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Control script for the blurt LaunchAgent.
 #
-#   ./service.sh install    render plist + bootstrap via launchctl
+#   ./service.sh install    render plist + bootstrap via launchctl + build Blurt.app
 #   ./service.sh start      load + start the agent
 #   ./service.sh stop       stop + unload the agent
 #   ./service.sh restart    stop then start (with a small settle delay)
@@ -44,8 +44,15 @@ case "${1:-}" in
         launchctl bootout "$domain" "$dst_plist" 2>/dev/null || true
         launchctl bootstrap "$domain" "$dst_plist"
         launchctl enable "$domain/$label"
+        # Convenience, not a requirement — warn but don't fail the install.
+        if "$here/make-app.sh" >/dev/null; then
+            app_line="Blurt.app (custom icon) installed to ~/Applications — click it to restart the service."
+        else
+            app_line="warning: Blurt.app creation failed; run ./make-app.sh manually."
+        fi
         cat <<EOF
 installed as $label.
+$app_line
 
 Next: ./permissions.sh   (walks you through granting Accessibility + Input Monitoring)
 Then:  ./service.sh restart
