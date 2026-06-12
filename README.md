@@ -72,6 +72,15 @@ macOS will prompt for **Microphone** permission the first time you hold the hotk
 
 For routine updates you don't need the terminal at all — see [Updating](#updating).
 
+### Uninstalling
+
+```bash
+./uninstall.sh          # remove the LaunchAgent, Blurt.app, config, logs
+./uninstall.sh --full   # + model weights cache + this checkout itself
+```
+
+Both modes print the TCC entries to remove by hand (macOS doesn't let scripts touch permission grants — and the grants attach to the uv-managed python binary, *not* the repo, so deleting the checkout alone does not reset them). `--full` opens the System Settings pane for you and is the right mode before testing a from-scratch `setup.sh`. uv and its pythons are left alone since other projects may share them.
+
 ### Updating
 
 blurt updates from **release channels** — floating git tags moved by `release.sh`:
