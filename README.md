@@ -74,18 +74,35 @@ For routine updates you don't need the terminal at all — see [Updating](#updat
 
 ### Updating
 
-The menu bar has a **Version: \<sha\> (\<date\>)** line showing the commit the daemon is currently running, and a **Check for Updates** item below it. The daemon also checks once in the background at startup, so after a push the menu usually already reads **Update to \<sha\> (N commits behind)** — click it to update.
+blurt updates from **release channels** — floating git tags moved by `release.sh`:
 
-Clicking the update label runs: `git fetch` → `git reset --hard origin/main` → `uv sync` → exit with a non-zero status, which makes launchd (via `KeepAlive {SuccessfulExit: false}` in the plist) relaunch the daemon on the new code within a second or two. There is no periodic polling after startup; the manual click is the refresh path.
+- 🗣️ **`shout`** — stable. The default channel; what every Mac should run.
+- 🤫 **`mumble`** — beta. Releases land here first and soak before promotion.
+
+Pick your channel from the menu-bar **Channel** submenu (persisted per machine). The **Version:** line shows the release the daemon is running and the channel (e.g. `Version: v0.2.0 (2026-06-12) · shout`), and **Check for Updates** compares your machine to the channel's tag. The daemon also checks once in the background at startup, so after a release the menu usually already reads **Update to v0.2.0 (N commits behind)** — click it to update. Switching channels fires a check immediately; if the other channel points at a *different* (even older) release, the menu offers **Switch to vX.Y.Z** — so moving from beta back to stable is a clean, deliberate downgrade.
+
+Clicking the update label runs: `git fetch --tags` → `git reset --hard <channel tag>` → `uv sync` → exit with a non-zero status, which makes launchd (via `KeepAlive {SuccessfulExit: false}` in the plist) relaunch the daemon on the released code within a second or two. There is no periodic polling after startup; the manual click is the refresh path.
 
 The update item refuses to run when it could lose work or state:
 
 - **Local changes** in tracked files (`Update unavailable: local changes`) — commit, stash, or revert first. Untracked files don't block, since `git reset --hard` preserves them.
-- **Not on `main`** (`Update unavailable: on <branch>`) — the updater only tracks `origin/main`.
+- **Not on `main`** (`Update unavailable: on <branch>`) — the checkout must be on `main` (its ref is what gets moved to the release).
 - **No LaunchAgent** (`Update requires LaunchAgent install`) — when running `uv run python blurt.py` interactively there's nothing to relaunch the process, so the item is disabled.
 - **Meeting recording in progress** — stop the recording first; the restart would discard it.
+- **No release cut yet** (`channel tag 'shout' not found — cut a release first`) — run `./release.sh` once.
 
-If `uv sync` fails, the label shows `Update failed — see logs` and the daemon keeps running the old code (but the checkout is already on the new SHA — run `uv sync` from Terminal or `git reset --hard <old sha>` to recover). The tracked remote/branch are the `UPDATE_REMOTE` / `UPDATE_BRANCH` constants in `blurt.py`.
+If `uv sync` fails, the label shows `Update failed — see logs` and the daemon keeps running the old code (but the checkout is already on the released commit — run `uv sync` from Terminal to recover). The remote, required branch, and channel names are the `UPDATE_REMOTE` / `UPDATE_BRANCH` / `UPDATE_CHANNELS` constants in `blurt.py`.
+
+### Cutting a release
+
+```bash
+./release.sh            # cut a beta: tag vX.Y.Z, GitHub pre-release, move 🤫 mumble
+./release.sh --minor    # same, but bump the minor (or --major)
+./release.sh promote    # graduate: move 🗣️ shout to mumble's release, mark it latest
+./release.sh status     # where the channels point + unreleased commits on main
+```
+
+Every release is an immutable `vX.Y.Z` tag plus a GitHub Release with notes auto-generated from the merged PRs (`gh release create --generate-notes`). Cutting requires a clean `main` matching `origin/main`. Promotion never rebuilds anything — it re-points `shout` at the exact commit that soaked on `mumble` and flips the GitHub Release from pre-release to latest. The flow is: merge PRs → `./release.sh` → run the beta on a Mumble machine for a while → `./release.sh promote`.
 
 ## Permissions
 
@@ -183,9 +200,10 @@ All knobs are constants at the top of `blurt.py`:
 | `SOUND_VOLUME`            | `0.3`                                  | `afplay -v` argument, 0.0–1.0.                               |
 | `MEETING_DIR`             | `~/Documents/blurt-meetings`           | Where meeting transcripts + WAVs are saved.                  |
 | `MEETING_CHUNK_SEC`       | `30.0`                                 | Meeting transcription chunk length.                          |
-| `UPDATE_REMOTE` / `UPDATE_BRANCH` | `origin` / `main`              | What the menu-bar updater fetches and resets to.             |
+| `UPDATE_REMOTE` / `UPDATE_BRANCH` | `origin` / `main`              | Remote + required local branch for updates.                  |
+| `UPDATE_CHANNELS`         | `("shout", "mumble")`                  | The floating release-channel tags (stable, beta).            |
 
-The microphone and all three hotkeys are chosen from menu-bar submenus and persisted to `~/Library/Application Support/blurt/config.json` (keys `microphone`, `hotkey`, `type_hotkey`, `clipboard_hotkey`). Hotkey defaults are Right Option / Right Command / Left Control. The picker offers single modifiers and F13–F19; no two hotkeys may share a key.
+The microphone, all three hotkeys, and the release channel are chosen from menu-bar submenus and persisted to `~/Library/Application Support/blurt/config.json` (keys `microphone`, `hotkey`, `type_hotkey`, `clipboard_hotkey`, `update_channel`). Hotkey defaults are Right Option / Right Command / Left Control; the channel defaults to `shout`. The picker offers single modifiers and F13–F19; no two hotkeys may share a key.
 
 ## Architecture
 
