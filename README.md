@@ -1,12 +1,57 @@
-# blurt
+# blurt 🎙
 
-Push-to-talk dictation for macOS, running fully locally on Apple Silicon.
+**Hold a key. Say the thing. It's typed.**
 
-Hold **Right Option (⌥)**, speak, release — text pastes at your cursor.
+blurt is push-to-talk dictation for macOS that runs *entirely on your Mac*. Hold **Right Option (⌥)**, speak, release — and your words land at the cursor, in any app, before you've finished reaching for the keyboard. No cloud. No account. No subscription. No audio ever leaving your machine.
 
-- **Fast.** ~60–360 ms end-to-end for 1–10 s utterances on an M-series Mac.
-- **Local.** No cloud, no API keys, no network traffic after model download.
-- **Small.** A single ~1,600-line Python file, one background daemon, one menu-bar icon.
+## Why you'll love it
+
+**⚡ It's absurdly fast.** Speech hits your screen in **60–360 milliseconds** after you release the key. That's not "fast for dictation" — that's faster than a keystroke repeat. NVIDIA's Parakeet model running on Apple Silicon via MLX means the only network involved is the one between your mouth and the mic.
+
+**🔒 It's radically private.** After a one-time ~600 MB model download, blurt never touches the network for transcription — not your voice, not your text, not anything you say out loud while it's listening. Your off-the-record stays off the record. Air-gap it after install if you like; it won't notice.
+
+**👻 It's invisible until you need it.** One emoji in your menu bar. No window, no dock icon, no app to switch to. `🎙` waiting → `🔴` recording → `✨` thinking → your words appear. A Tink when it starts listening, a Pop when it stops, so you never have to look.
+
+## What it can do
+
+### Dictate into literally anything
+Anywhere a cursor blinks — editors, browsers, chat apps, terminal prompts, that one enterprise web form that hates you. blurt delivers through the clipboard with a synthesized ⌘V, then quietly **restores whatever you had on the clipboard before**. Speak two thoughts back-to-back and it inserts the joining space for you; pause and move to a new context, and it doesn't.
+
+### Defeat the remote-desktop gulag
+Working in a VDI or remote desktop that mangles paste? blurt has **three independent hotkeys**, each its own superpower:
+
+| Hold… | Get… |
+| ----- | ---- |
+| **Right ⌥** | Dictate → paste. The fast path for normal apps. |
+| **Right ⌘** | Dictate → *typed keystrokes*. Sails straight through remote clients that block or garble ⌘V. |
+| **Left ⌃** | **Type your clipboard** as keystrokes — no mic involved. Prepared text goes into paste-hostile environments one keystroke at a time. Press again mid-flight to abort. |
+
+Every hotkey is rebindable from the menu bar (modifiers or F13–F19), per machine, with collision-proofing so you can't bind two actions to one key.
+
+### Transcribe entire meetings
+Click **Start Meeting Recording** and walk away. blurt captures the call, transcribes it in ~30-second chunks *as it happens*, and the moment you click stop, a timestamped transcript opens in your editor — with the raw WAV saved beside it. Both files grow incrementally, so even a crash mid-meeting leaves you a usable recording and a partial transcript. Add a loopback device like BlackHole and it captures everyone on the call, not just you.
+
+### Refuse to hallucinate
+Speech models love inventing `"Thank you for watching."` out of silence. blurt runs a two-layer defense: a **voice-activity gate** that skips transcription entirely when you didn't actually say anything (accidental key brush? nothing happens), and an **edge-cleanup pass** that strips hallucinated backchannels and training-data artifacts before they ever reach your document.
+
+### Update itself like a real product
+blurt ships through **release channels** — pick yours from the menu bar:
+
+- 🗣️ **Shout** — stable. Releases that earned it.
+- 🤫 **Mumble** — beta. Hear it early; it might be slurred.
+
+Every release is a tagged version with auto-generated GitHub release notes. The menu tells you `Update to v0.2.0 (3 commits behind)`; one click fetches, syncs, and the daemon restarts itself on the new version in about a second. Betas soak on Mumble, then get promoted to Shout **bit-for-bit** — what you tested is exactly what ships. Switching channels even handles downgrades cleanly.
+
+### Install in one command, vanish in one command
+`git clone … && ./setup.sh` is the whole install. blurt asks macOS for its own permissions — the dialogs come to *you*, you flip two toggles, and the daemon restarts itself the moment they're granted. If a Python upgrade ever makes macOS forget the grants (a classic way tools like this silently die), blurt notices at startup, re-prompts, and heals itself. And when you want it gone, `./uninstall.sh --full` removes every trace it ever existed — service, app, config, logs, model, even its own checkout.
+
+### Tune every knob, or none
+Pick your microphone from the menu. Pick all three hotkeys. Pick your channel. Everything else — VAD sensitivity, sounds, volumes, typing speed for cranky VDIs, meeting chunk length — is a named constant at the top of one readable Python file. Which brings us to…
+
+### Read the whole thing over coffee
+blurt is **a single ~1,600-line Python file**. One daemon, one menu-bar icon, zero frameworks-of-frameworks. You can audit every line that hears your voice in one sitting — try that with a cloud dictation subscription.
+
+**Free. Open. MIT-licensed. Yours.**
 
 Built on [parakeet-mlx](https://github.com/senstella/parakeet-mlx) (Apple-Silicon port of NVIDIA's Parakeet-TDT) with [MLX](https://github.com/ml-explore/mlx), [sounddevice](https://python-sounddevice.readthedocs.io/) for mic capture, [pynput](https://pynput.readthedocs.io/) for the global hotkey, and [rumps](https://github.com/jaredks/rumps) for the menu bar.
 
