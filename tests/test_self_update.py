@@ -105,6 +105,35 @@ def test_check_for_updates_non_repo(tmp_path, monkeypatch):
     assert result.status == "check_failed"
 
 
+# --- uv resolution ------------------------------------------------------------
+
+def test_uv_binary_prefers_path(monkeypatch):
+    """When uv is on PATH, use whatever shutil.which finds."""
+    import blurt
+    monkeypatch.setattr(blurt.shutil, "which", lambda name: "/opt/somewhere/bin/uv")
+    assert blurt._uv_binary() == "/opt/somewhere/bin/uv"
+
+
+def test_uv_binary_falls_back_to_local_bin(monkeypatch, tmp_path):
+    """launchd's default PATH lacks ~/.local/bin, where the astral.sh installer
+    puts uv — the resolver must fall back there explicitly."""
+    import blurt
+    monkeypatch.setattr(blurt.shutil, "which", lambda name: None)
+    monkeypatch.setattr(blurt.Path, "home", staticmethod(lambda: tmp_path))
+    uv = tmp_path / ".local" / "bin" / "uv"
+    uv.parent.mkdir(parents=True)
+    uv.write_text("#!/bin/sh\n")
+    assert blurt._uv_binary() == str(uv)
+
+
+def test_uv_binary_missing_raises(monkeypatch, tmp_path):
+    import blurt
+    monkeypatch.setattr(blurt.shutil, "which", lambda name: None)
+    monkeypatch.setattr(blurt.Path, "home", staticmethod(lambda: tmp_path))
+    with pytest.raises(FileNotFoundError):
+        blurt._uv_binary()
+
+
 # --- restart mechanism ------------------------------------------------------
 
 def test_restart_daemon_exits_nonzero():
